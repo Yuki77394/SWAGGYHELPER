@@ -99,6 +99,33 @@ MAX_SECONDS = 24 * 60 * 60
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smh])\s*$", re.IGNORECASE)
 
+# Channel-side success responses are auto-deleted after this many seconds.
+# The wait is done via a non-blocking asyncio.create_task so the bot stays
+# fully responsive during the 2-minute window.
+_CHANNEL_RESPONSE_TTL = 120
+
+
+async def _delete_after(message: Message, delay: int) -> None:
+    """Non-blocking delayed deletion helper.
+
+    Spawns a background ``asyncio.create_task`` that sleeps for ``delay``
+    seconds and then deletes the given message.  The bot stays fully
+    responsive during the wait — this is NOT ``time.sleep()``.
+
+    If the message is already deleted by the time the task fires, the
+    resulting Telegram error is safely suppressed.
+    """
+
+    async def _inner():
+        try:
+            await asyncio.sleep(delay)
+            with suppress(Exception):
+                await message.delete()
+        except Exception:
+            pass
+
+    asyncio.create_task(_inner())
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -376,39 +403,31 @@ async def setdelay_handler(_, message: Message):
     parts = text.split(maxsplit=1)
     value = parts[1].strip() if len(parts) == 2 else ""
 
-    # `/setdelay on` is intentionally invalid.
+    # `/setdelay on` is intentionally invalid — delete command + show error.
     if value.lower() == "on":
+        with suppress(Exception):
+            await message.delete()
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_DELAY)
         return
 
+    # ─── CHANNEL-SIDE OFF IS FORBIDDEN ─────────────────────────────────
+    # /setdelay off in a channel is SILENTLY IGNORED:
+    #   1. Delete the user's command immediately.
+    #   2. Send NO bot response.
+    #   3. Do NOT modify MongoDB.
+    #   4. Do NOT create an activity log.
+    # The ONLY way to disable SETDELAY is via the bot's private chat:
+    #   /setdelay → Channel ID → 🔴 DISABLE
     if value.lower() == "off":
-        # Fetch current settings BEFORE the update to detect state change
-        prior = await settings_db.find_one({"chat_id": message.chat.id})
-        was_enabled = bool(prior and prior.get("enabled"))
-
-        # Remove the delay configuration itself. Keep gap settings if active.
-        await settings_db.update_one(
-            {"chat_id": message.chat.id},
-            {"$unset": {"enabled": "", "delay": ""}},
-        )
-        remaining = await settings_db.find_one({"chat_id": message.chat.id})
-        if remaining and not remaining.get("gap_enabled") and "gap" not in remaining:
-            await settings_db.delete_one({"chat_id": message.chat.id})
         with suppress(Exception):
-            await message.reply_text("Turned off for new messages!")
-
-        # Activity log — only if delay was actually enabled (state change)
-        if was_enabled:
-            with suppress(Exception):
-                await log_setdelay_change(
-                    message.chat, message.from_user, "DISABLED",
-                )
-        # Note: already-scheduled deletion jobs keep their existing delete_at.
+            await message.delete()
         return
 
     seconds = _parse_duration(value)
     if seconds is None:
+        with suppress(Exception):
+            await message.delete()
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_DELAY)
         return
@@ -430,16 +449,26 @@ async def setdelay_handler(_, message: Message):
         upsert=True,
     )
 
+    # Delete the user's command immediately (channel-side auto-cleanup).
     with suppress(Exception):
-        await message.reply_text(f"Successfully updated to {value.lower()}!")
+        await message.delete()
 
-    # Activity log — only if the state actually changed
+    # Send success response — it will be auto-deleted after 120 seconds
+    # via the non-blocking _delete_after helper.
+    response = None
+    with suppress(Exception):
+        response = await message.reply_text(f"Successfully updated to {value.lower()}!")
+    if response:
+        await _delete_after(response, _CHANNEL_RESPONSE_TTL)
+
+    # Activity log — only if the state actually changed (source=CHANNEL)
     with suppress(Exception):
         if not was_enabled:
             # Was disabled, now enabled
             await log_setdelay_change(
                 message.chat, message.from_user, "ENABLED",
                 delay_value=_format_duration(seconds),
+                source="CHANNEL",
             )
         elif old_delay != seconds:
             # Was enabled with a different value, now updated
@@ -447,6 +476,7 @@ async def setdelay_handler(_, message: Message):
                 message.chat, message.from_user, "UPDATED",
                 delay_value=_format_duration(seconds),
                 old_value=_format_duration(old_delay),
+                source="CHANNEL",
             )
         # If was_enabled and old_delay == seconds → no state change, no log
 
@@ -478,37 +508,28 @@ async def setgap_handler(_, message: Message):
 
     if value.lower() == "on":
         with suppress(Exception):
+            await message.delete()
+        with suppress(Exception):
             await message.reply_text(INVALID_TEXT_GAP)
         return
 
+    # ─── CHANNEL-SIDE OFF IS FORBIDDEN ─────────────────────────────────
+    # /setgap off in a channel is SILENTLY IGNORED:
+    #   1. Delete the user's command immediately.
+    #   2. Send NO bot response.
+    #   3. Do NOT modify MongoDB.
+    #   4. Do NOT create an activity log.
+    # The ONLY way to disable SETGAP is via the bot's private chat:
+    #   /setgap → Channel ID → 🔴 DISABLE
     if value.lower() == "off":
-        # Fetch current settings BEFORE the update to detect state change
-        prior = await settings_db.find_one({"chat_id": message.chat.id})
-        was_enabled = bool(prior and prior.get("gap_enabled"))
-
-        # Remove the gap configuration itself. Keep delay settings if active.
-        await settings_db.update_one(
-            {"chat_id": message.chat.id},
-            {"$unset": {
-                "gap_enabled": "", "gap": "", "last_gap_post_at": "",
-            }},
-        )
-        remaining = await settings_db.find_one({"chat_id": message.chat.id})
-        if remaining and not remaining.get("enabled") and "delay" not in remaining:
-            await settings_db.delete_one({"chat_id": message.chat.id})
         with suppress(Exception):
-            await message.reply_text("Gap turned off for new messages!")
-
-        # Activity log — only if gap was actually enabled (state change)
-        if was_enabled:
-            with suppress(Exception):
-                await log_setgap_change(
-                    message.chat, message.from_user, "DISABLED",
-                )
+            await message.delete()
         return
 
     seconds = _parse_duration(value)
     if seconds is None:
+        with suppress(Exception):
+            await message.delete()
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_GAP)
         return
@@ -535,18 +556,28 @@ async def setgap_handler(_, message: Message):
         upsert=True,
     )
 
+    # Delete the user's command immediately (channel-side auto-cleanup).
     with suppress(Exception):
-        await message.reply_text(
+        await message.delete()
+
+    # Send success response — it will be auto-deleted after 120 seconds
+    # via the non-blocking _delete_after helper.
+    response = None
+    with suppress(Exception):
+        response = await message.reply_text(
             f"Successfully updated gap to {value.lower()}!"
         )
+    if response:
+        await _delete_after(response, _CHANNEL_RESPONSE_TTL)
 
-    # Activity log — only if the state actually changed
+    # Activity log — only if the state actually changed (source=CHANNEL)
     with suppress(Exception):
         if not was_enabled:
             # Was disabled, now enabled
             await log_setgap_change(
                 message.chat, message.from_user, "ENABLED",
                 gap_value=_format_duration(seconds),
+                source="CHANNEL",
             )
         elif old_gap != seconds:
             # Was enabled with a different value, now updated
@@ -554,6 +585,7 @@ async def setgap_handler(_, message: Message):
                 message.chat, message.from_user, "UPDATED",
                 gap_value=_format_duration(seconds),
                 old_value=_format_duration(old_gap),
+                source="CHANNEL",
             )
         # If was_enabled and old_gap == seconds → no state change, no log
 

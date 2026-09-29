@@ -257,6 +257,7 @@ async def log_setdelay_change(
     chat, user, status: str, *,
     delay_value: Optional[str] = None,
     old_value: Optional[str] = None,
+    source: str = "CHANNEL",
 ) -> None:
     """Log a /setdelay state change for a specific channel.
 
@@ -273,6 +274,8 @@ async def log_setdelay_change(
         Required for ENABLED and UPDATED.
     old_value : str, optional
         The previous delay value (human-readable).  Required for UPDATED.
+    source : str
+        ``"CHANNEL"`` or ``"PRIVATE CHAT"`` — where the change was made.
     """
 
     ch_title = _format_channel_title(chat)
@@ -300,6 +303,7 @@ async def log_setdelay_change(
 
     text = (
         f"{header}\n\n"
+        f"📍 <b>Source:</b> {html.escape(source, quote=False)}\n\n"
         f"📌 <b>Channel:</b> {ch_title}\n"
         f"🆔 <b>Channel ID:</b> <code>{ch_id}</code>\n"
         f"🔗 <b>Username:</b> {ch_uname}\n\n"
@@ -316,6 +320,7 @@ async def log_setgap_change(
     chat, user, status: str, *,
     gap_value: Optional[str] = None,
     old_value: Optional[str] = None,
+    source: str = "CHANNEL",
 ) -> None:
     """Log a /setgap state change for a specific channel.
 
@@ -331,6 +336,8 @@ async def log_setgap_change(
         The new gap value (human-readable).  Required for ENABLED and UPDATED.
     old_value : str, optional
         The previous gap value (human-readable).  Required for UPDATED.
+    source : str
+        ``"CHANNEL"`` or ``"PRIVATE CHAT"`` — where the change was made.
     """
 
     ch_title = _format_channel_title(chat)
@@ -358,6 +365,7 @@ async def log_setgap_change(
 
     text = (
         f"{header}\n\n"
+        f"📍 <b>Source:</b> {html.escape(source, quote=False)}\n\n"
         f"📌 <b>Channel:</b> {ch_title}\n"
         f"🆔 <b>Channel ID:</b> <code>{ch_id}</code>\n"
         f"🔗 <b>Username:</b> {ch_uname}\n\n"
