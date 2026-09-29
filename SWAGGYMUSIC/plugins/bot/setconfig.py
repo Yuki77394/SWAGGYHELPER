@@ -555,7 +555,10 @@ async def _do_enable(feature: str, channel_id: int, seconds: int) -> str:
                         "gap": seconds,
                         "gap_enabled": True,
                     },
-                    "$unset": {"last_gap_post_at": ""},
+                    "$unset": {
+                        "last_gap_post_at": "",
+                        "last_gap_post_msg_id": "",
+                    },
                 },
                 upsert=True,
             )
@@ -622,7 +625,8 @@ async def _do_disable(feature: str, channel_id: int) -> bool:
             await settings_db.update_one(
                 {"chat_id": channel_id},
                 {"$unset": {
-                    "gap_enabled": "", "gap": "", "last_gap_post_at": "",
+                    "gap_enabled": "", "gap": "",
+                    "last_gap_post_at": "", "last_gap_post_msg_id": "",
                 }},
             )
             remaining = await settings_db.find_one({"chat_id": channel_id})

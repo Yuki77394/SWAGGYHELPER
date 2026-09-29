@@ -192,7 +192,9 @@ async def _bot_can_delete(chat_id: int) -> bool:
         return False
 
 
-async def _gap_allows_post(chat_id: int, now: int, gap: int) -> bool:
+async def _gap_allows_post(
+    chat_id: int, post_time: int, gap: int, msg_id: int,
+) -> bool:
     """Atomically reserve the next allowed-post slot for this channel.
 
     Posts arriving before the gap expires are NOT allowed to reserve
@@ -204,8 +206,12 @@ async def _gap_allows_post(chat_id: int, now: int, gap: int) -> bool:
     older than the cutoff". The atomicity of Mongo's update means
     that if two posters race here, only one will receive a non-None
     document back — the other will receive None and be rejected.
+
+    Stores both ``last_gap_post_at`` (the post's original Telegram
+    timestamp) and ``last_gap_post_msg_id`` (the message ID) so the
+    stale-reference detector can verify the reference still exists.
     """
-    cutoff = now - gap
+    cutoff = post_time - gap
     updated = await settings_db.find_one_and_update(
         {
             "chat_id": chat_id,
@@ -216,10 +222,197 @@ async def _gap_allows_post(chat_id: int, now: int, gap: int) -> bool:
                 {"last_gap_post_at": {"$lte": cutoff}},
             ],
         },
-        {"$set": {"last_gap_post_at": now}},
+        {
+            "$set": {
+                "last_gap_post_at": post_time,
+                "last_gap_post_msg_id": msg_id,
+            }
+        },
         return_document=True,  # ReturnDocument.AFTER
     )
     return updated is not None
+
+
+# ---------------------------------------------------------------------------
+# Stale-reference detection — manual-deletion safety
+# ---------------------------------------------------------------------------
+#
+# When a post is accepted by the gap engine, its message_id is stored as
+# ``last_gap_post_msg_id`` alongside ``last_gap_post_at`` (the post's
+# original Telegram timestamp).  If the user later MANUALLY DELETES that
+# accepted post from the channel, the stored reference becomes stale —
+# the timestamp is still valid in MongoDB but the actual message is gone.
+#
+# Before making the gap decision for a NEW post, ``_resolve_stale_gap_reference``
+# checks whether the stored reference message still EXISTS in Telegram.
+# If it doesn't, the function resolves the latest EXISTING channel post
+# before the current incoming post and updates the stored reference.
+#
+# This prevents a "phantom gap lock" — a situation where a deleted post
+# continues to block new posts for the full gap duration.
+#
+# The existence check uses ``app.get_messages()`` (single API call) and
+# the latest-existing-post resolution uses ``app.get_chat_history(limit=1,
+# offset=1)`` (single API call, skips deleted messages automatically).
+#
+# Both the resolution update and the atomic gap check use preconditions
+# to preserve atomicity — if two posts race, only one wins.
+
+
+async def _message_exists(chat_id: int, message_id: int) -> bool:
+    """Check whether a specific message still exists in the channel.
+
+    Uses ``app.get_messages()`` — a single API call.  Returns ``True``
+    if the message exists, ``False`` if it was deleted.
+
+    If the API call fails for any reason (network error, timeout, etc.),
+    returns ``True`` — the SAFE DEFAULT is to assume the message still
+    exists, so we don't block posts due to API errors.  The spec says:
+    "Do NOT treat every unexpected API/network error as proof that the
+    message was manually deleted."
+    """
+    try:
+        msg = await app.get_messages(chat_id, message_id)
+        if msg is None:
+            return False
+        # Pyrogram returns a Message-like object with empty=True for
+        # deleted/non-existent messages.
+        if getattr(msg, "empty", False):
+            return False
+        # A message with no date is a deleted/empty placeholder.
+        if getattr(msg, "date", None) is None:
+            return False
+        return True
+    except Exception as exc:
+        log.debug(
+            "Message existence check failed for %s/%s: %s: %s",
+            chat_id, message_id, type(exc).__name__, exc,
+        )
+        # Safe default — assume the message exists.
+        return True
+
+
+async def _get_latest_existing_post_before(chat_id: int, current_msg_id: int):
+    """Find the latest EXISTING channel post before the current incoming post.
+
+    Uses ``app.get_chat_history(limit=1, offset=1)`` — a single API call
+    that skips the most recent message (the current incoming post) and
+    returns the one before it.  ``get_chat_history`` automatically skips
+    deleted messages, so this returns the latest EXISTING post.
+
+    Returns the ``Message`` object, or ``None`` if no previous existing
+    post exists (channel was empty, or all previous posts were deleted).
+    """
+    try:
+        async for msg in app.get_chat_history(chat_id, limit=1, offset=1):
+            # get_chat_history skips deleted messages — but double-check.
+            if getattr(msg, "empty", False) or getattr(msg, "date", None) is None:
+                return None
+            return msg
+        return None
+    except Exception as exc:
+        log.debug(
+            "get_latest_existing_post failed for %s (before msg %s): %s: %s",
+            chat_id, current_msg_id, type(exc).__name__, exc,
+        )
+        return None
+
+
+async def _resolve_stale_gap_reference(chat_id: int, current_message: Message) -> None:
+    """Detect and fix a stale gap reference caused by manual deletion.
+
+    Called BEFORE ``_gap_allows_post()`` so the atomic gap check uses
+    the correct reference.  Steps:
+
+    1. Read the current settings document.
+    2. If ``last_gap_post_msg_id`` exists, check if that message still
+       exists in Telegram via ``_message_exists()``.
+    3. If the message still exists → no correction needed, return.
+    4. If the message was manually deleted → resolve the latest existing
+       post before the current one via ``_get_latest_existing_post_before()``.
+    5. If a previous existing post is found → update ``last_gap_post_at``
+       and ``last_gap_post_msg_id`` to that post's timestamp and ID.
+    6. If no previous existing post is found → clear the stored reference
+       so the gap doesn't block (the current post will be accepted and
+       become the new reference).
+
+    The update uses a precondition (``last_gap_post_msg_id`` must match
+    the stored value) to avoid race conditions — if another concurrent
+    post already updated the reference, this update is a no-op.  The
+    final gap decision is still made atomically by ``_gap_allows_post()``.
+
+    This function NEVER raises — all exceptions are caught and logged.
+    """
+    try:
+        setting = await settings_db.find_one({"chat_id": chat_id})
+        if not setting or not setting.get("gap_enabled"):
+            return
+
+        stored_msg_id = setting.get("last_gap_post_msg_id")
+        if not stored_msg_id:
+            # No stored message_id — old document from before this fix.
+            # Can't check existence. Fall through to the normal gap check.
+            return
+
+        # STEP 1: Check if the stored reference message still exists.
+        if await _message_exists(chat_id, int(stored_msg_id)):
+            # Reference is valid — no correction needed.
+            return
+
+        # STEP 2: Reference is STALE — resolve the latest existing post.
+        latest_existing = await _get_latest_existing_post_before(
+            chat_id, current_message.id
+        )
+
+        if latest_existing is not None:
+            new_timestamp = _post_unix_time(latest_existing)
+            new_msg_id = latest_existing.id
+
+            # Update with precondition: only if last_gap_post_msg_id
+            # hasn't changed (avoid race with another concurrent post).
+            await settings_db.update_one(
+                {
+                    "chat_id": chat_id,
+                    "last_gap_post_msg_id": stored_msg_id,
+                },
+                {
+                    "$set": {
+                        "last_gap_post_at": new_timestamp,
+                        "last_gap_post_msg_id": new_msg_id,
+                    },
+                },
+            )
+            log.debug(
+                "Stale gap reference resolved for %s: msg %s → msg %s "
+                "(ts %s → ts %s)",
+                chat_id, stored_msg_id, new_msg_id,
+                setting.get("last_gap_post_at"), new_timestamp,
+            )
+        else:
+            # No previous existing post — clear the reference so the
+            # gap doesn't block. The current post will be accepted and
+            # become the new reference.
+            await settings_db.update_one(
+                {
+                    "chat_id": chat_id,
+                    "last_gap_post_msg_id": stored_msg_id,
+                },
+                {
+                    "$unset": {
+                        "last_gap_post_at": "",
+                        "last_gap_post_msg_id": "",
+                    },
+                },
+            )
+            log.debug(
+                "Stale gap reference cleared for %s: no previous existing post",
+                chat_id,
+            )
+    except Exception as exc:
+        log.debug(
+            "Stale gap reference resolution failed for %s: %s: %s",
+            chat_id, type(exc).__name__, exc,
+        )
 
 
 async def _queue_delete(chat_id: int, message_id: int, delay: int,
@@ -551,7 +744,10 @@ async def setgap_handler(_, message: Message):
             # otherwise previously allowed posts would retroactively
             # invalidate new posts because last_gap_post_at would be very
             # recent.
-            "$unset": {"last_gap_post_at": ""},
+            "$unset": {
+                "last_gap_post_at": "",
+                "last_gap_post_msg_id": "",
+            },
         },
         upsert=True,
     )
@@ -629,7 +825,11 @@ async def autodelete_new_channel_post(_, message: Message):
 
         is_delay_command = _is_setdelay_command(message)
         is_gap_command = _is_setgap_command(message)
-        now = int(time.time())
+
+        # Use the ORIGINAL Telegram post timestamp for gap calculations
+        # (not time.time()) so the gap is measured from the actual post
+        # time, not from when the bot happened to receive the update.
+        post_time = _post_unix_time(message)
 
         # ---- GAP --------------------------------------------------------
         # Only one post is allowed per configured interval. Posts inside
@@ -642,7 +842,18 @@ async def autodelete_new_channel_post(_, message: Message):
             and not is_gap_command
         ):
             gap = int(setting["gap"])
-            if not await _gap_allows_post(message.chat.id, now, gap):
+
+            # ─── STALE-REFERENCE DETECTION ──────────────────────────
+            # Before the atomic gap check, verify that the stored
+            # last-gap-post reference message still EXISTS in the channel.
+            # If it was manually deleted by the user, resolve the latest
+            # EXISTING post before this one and update the stored reference.
+            # This prevents a "phantom gap lock" from a deleted message.
+            await _resolve_stale_gap_reference(message.chat.id, message)
+
+            if not await _gap_allows_post(
+                message.chat.id, post_time, gap, message.id,
+            ):
                 with suppress(Exception):
                     await app.delete_messages(message.chat.id, message.id)
                 # No delay job is queued for a rejected post.
@@ -662,8 +873,8 @@ async def autodelete_new_channel_post(_, message: Message):
         # Use the ORIGINAL Telegram message date so the delay always
         # counts from the post time, not from when the bot happened to
         # receive the update. Editing the post later does not move
-        # delete_at — see _queue_delete.
-        post_time = _post_unix_time(message)
+        # delete_at — see _queue_delete.  ``post_time`` was already
+        # computed above for the gap check.
         await _queue_delete(message.chat.id, message.id, delay, post_time)
 
     except Exception as exc:
