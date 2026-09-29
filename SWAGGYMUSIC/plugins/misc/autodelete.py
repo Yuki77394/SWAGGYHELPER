@@ -86,6 +86,9 @@ from pyrogram.types import Message
 from SWAGGYMUSIC import app
 from SWAGGYMUSIC.core.mongo import mongodb
 from SWAGGYMUSIC.logging import LOGGER
+from SWAGGYMUSIC.utils.activity_logger import (_format_duration,
+                                               log_setdelay_change,
+                                               log_setgap_change)
 from SWAGGYMUSIC.utils.database import (ensure_channel_indexes, jobs_db,
                                         settings_db)
 
@@ -380,6 +383,10 @@ async def setdelay_handler(_, message: Message):
         return
 
     if value.lower() == "off":
+        # Fetch current settings BEFORE the update to detect state change
+        prior = await settings_db.find_one({"chat_id": message.chat.id})
+        was_enabled = bool(prior and prior.get("enabled"))
+
         # Remove the delay configuration itself. Keep gap settings if active.
         await settings_db.update_one(
             {"chat_id": message.chat.id},
@@ -390,6 +397,13 @@ async def setdelay_handler(_, message: Message):
             await settings_db.delete_one({"chat_id": message.chat.id})
         with suppress(Exception):
             await message.reply_text("Turned off for new messages!")
+
+        # Activity log — only if delay was actually enabled (state change)
+        if was_enabled:
+            with suppress(Exception):
+                await log_setdelay_change(
+                    message.chat, message.from_user, "DISABLED",
+                )
         # Note: already-scheduled deletion jobs keep their existing delete_at.
         return
 
@@ -398,6 +412,11 @@ async def setdelay_handler(_, message: Message):
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_DELAY)
         return
+
+    # Fetch current settings BEFORE the update to detect state change
+    prior = await settings_db.find_one({"chat_id": message.chat.id})
+    was_enabled = bool(prior and prior.get("enabled"))
+    old_delay = int(prior.get("delay") or 0) if was_enabled else 0
 
     await settings_db.update_one(
         {"chat_id": message.chat.id},
@@ -413,6 +432,23 @@ async def setdelay_handler(_, message: Message):
 
     with suppress(Exception):
         await message.reply_text(f"Successfully updated to {value.lower()}!")
+
+    # Activity log — only if the state actually changed
+    with suppress(Exception):
+        if not was_enabled:
+            # Was disabled, now enabled
+            await log_setdelay_change(
+                message.chat, message.from_user, "ENABLED",
+                delay_value=_format_duration(seconds),
+            )
+        elif old_delay != seconds:
+            # Was enabled with a different value, now updated
+            await log_setdelay_change(
+                message.chat, message.from_user, "UPDATED",
+                delay_value=_format_duration(seconds),
+                old_value=_format_duration(old_delay),
+            )
+        # If was_enabled and old_delay == seconds → no state change, no log
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +482,10 @@ async def setgap_handler(_, message: Message):
         return
 
     if value.lower() == "off":
+        # Fetch current settings BEFORE the update to detect state change
+        prior = await settings_db.find_one({"chat_id": message.chat.id})
+        was_enabled = bool(prior and prior.get("gap_enabled"))
+
         # Remove the gap configuration itself. Keep delay settings if active.
         await settings_db.update_one(
             {"chat_id": message.chat.id},
@@ -458,6 +498,13 @@ async def setgap_handler(_, message: Message):
             await settings_db.delete_one({"chat_id": message.chat.id})
         with suppress(Exception):
             await message.reply_text("Gap turned off for new messages!")
+
+        # Activity log — only if gap was actually enabled (state change)
+        if was_enabled:
+            with suppress(Exception):
+                await log_setgap_change(
+                    message.chat, message.from_user, "DISABLED",
+                )
         return
 
     seconds = _parse_duration(value)
@@ -465,6 +512,11 @@ async def setgap_handler(_, message: Message):
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_GAP)
         return
+
+    # Fetch current settings BEFORE the update to detect state change
+    prior = await settings_db.find_one({"chat_id": message.chat.id})
+    was_enabled = bool(prior and prior.get("gap_enabled"))
+    old_gap = int(prior.get("gap") or 0) if was_enabled else 0
 
     await settings_db.update_one(
         {"chat_id": message.chat.id},
@@ -487,6 +539,23 @@ async def setgap_handler(_, message: Message):
         await message.reply_text(
             f"Successfully updated gap to {value.lower()}!"
         )
+
+    # Activity log — only if the state actually changed
+    with suppress(Exception):
+        if not was_enabled:
+            # Was disabled, now enabled
+            await log_setgap_change(
+                message.chat, message.from_user, "ENABLED",
+                gap_value=_format_duration(seconds),
+            )
+        elif old_gap != seconds:
+            # Was enabled with a different value, now updated
+            await log_setgap_change(
+                message.chat, message.from_user, "UPDATED",
+                gap_value=_format_duration(seconds),
+                old_value=_format_duration(old_gap),
+            )
+        # If was_enabled and old_gap == seconds → no state change, no log
 
 
 # ---------------------------------------------------------------------------
