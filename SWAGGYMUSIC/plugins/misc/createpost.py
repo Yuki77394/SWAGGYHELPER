@@ -369,12 +369,9 @@ async def _bot_admin_status(chat_id: int):
 
 
 RESTRICTION_TEXT = (
-    "🔒 <b>Fᴇᴀᴛᴜʀᴇ Rᴇsᴛʀɪᴄᴛᴇᴅ</b>\n\n"
+    "🔒 Fᴇᴀᴛᴜʀᴇ Rᴇsᴛʀɪᴄᴛᴇᴅ\n\n"
     "Tʜɪs ғᴇᴀᴛᴜʀᴇ ɪs ᴄᴜʀʀᴇɴᴛʟʏ ʀᴇsᴛʀɪᴄᴛᴇᴅ.\n\n"
-    "Tᴏ ᴜsᴇ <b>Cʀᴇᴀᴛᴇ Pᴏsᴛ</b>,\n"
-    "Pʟᴇᴀsᴇ ᴄᴏɴᴛᴀᴄᴛ\n"
-    f'<a href="tg://user?id={config.OWNER_ID}">ꜱᴡΛɢɢʏ™</a>\n'
-    "Fᴏʀ Aᴄᴄᴇss.\n\n"
+    f'Tᴏ ᴜsᴇ Cʀᴇᴀᴛᴇ Pᴏsᴛ, Pʟᴇᴀsᴇ ᴄᴏɴᴛᴀᴄᴛ <a href="tg://user?id={config.OWNER_ID}">ꜱᴡΛɢɢʏ™</a> Fᴏʀ Aᴄᴄᴇss.\n\n'
     "❌ Yᴏᴜʀ ᴘᴏsᴛ ᴡᴀs ɴᴏᴛ ᴄʀᴇᴀᴛᴇᴅ."
 )
 
@@ -393,6 +390,7 @@ def _restriction_keyboard():
                 InlineKeyboardButton(
                     text="Gᴇᴛ Aᴄᴄᴇss",
                     user_id=config.OWNER_ID,
+                    style=ButtonStyle.SUCCESS,
                 )
             ]
         ]
