@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: SWAGGYMUSIC Channel Bot
+    env: python
+    plan: free
+    region: oregon
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python3 -m SWAGGYMUSIC
+    autoDeploy: true
+    envVars:
+      - key: API_ID
+        value: ""
+      - key: API_HASH
+        value: ""
+      - key: BOT_TOKEN
+        value: ""
+      - key: LOGGER_ID
+        value: ""
+      - key: MONGO_DB_URI
+        value: ""
+      - key: OWNER_ID
+        value: ""
+      - key: UPSTREAM_REPO
+        value: "https://github.com/Yuki77394/KURIGRAMSWAG"
+      - key: UPSTREAM_BRANCH
+        value: "main"
+      - key: GIT_TOKEN
+        sync: false

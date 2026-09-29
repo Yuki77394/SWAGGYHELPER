@@ -1,0 +1,23 @@
+version: "1"
+
+services:
+  - name: swaggymusic-bot
+    type: container
+    image: koyeb/python:3.11
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env:
+      API_ID: ""
+      API_HASH: ""
+      BOT_TOKEN: ""
+      LOGGER_ID: ""
+      MONGO_DB_URI: ""
+      OWNER_ID: ""
+    plan: starter
+    region: ewr
+    instanceCount: 1
+    instanceSize: s
+    startCommand: python3 -m SWAGGYMUSIC
+    autoDeploy: true
+    mounts: []

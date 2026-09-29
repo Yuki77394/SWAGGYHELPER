@@ -1,0 +1,62 @@
+{
+    "name": "𝚮հҽ 𝚨Łꪮⲛ𝛆 🚩𝗧ε᧘‌ᴍ — Channel Management",
+    "description": "A standalone Telegram channel-management utility bot (Auto Delete, Set Gap, Create Post). Built on the SWAGGYMUSIC / Kurigram architecture.",
+    "logo": "https://files.catbox.moe/4th1ps.jpg",
+    "keywords": [
+        "python3",
+        "telegram",
+        "bot",
+        "SWAGGYMUSIC",
+        "channel-management",
+        "auto-delete",
+        "kurigram"
+    ],
+    "env": {
+        "API_ID": {
+            "description": "Get this value from https://my.telegram.org",
+            "value": "",
+            "required": true
+        },
+        "API_HASH": {
+            "description": "Get this value from https://my.telegram.org",
+            "value": "",
+            "required": true
+        },
+        "BOT_TOKEN": {
+            "description": "A Bot's token from BotFather",
+            "value": "",
+            "required": true
+        },
+        "MONGO_DB_URI": {
+            "description": "Get a MongoDB URI from https://cloud.mongodb.com",
+            "value": "",
+            "required": true
+        },
+        "OWNER_ID": {
+            "description": "The numeric user id of the user you want as OWNER",
+            "value": "",
+            "required": true
+        },
+        "LOGGER_ID": {
+            "description": "Your Log Group/Channel ID. Add the bot here and promote it as admin.",
+            "value": "",
+            "required": true
+        },
+        "HEROKU_APP_NAME": {
+            "description": "Optional — your Heroku app name (only for auto-restart on git push)",
+            "value": "",
+            "required": false
+        },
+        "HEROKU_API_KEY": {
+            "description": "Optional — your Heroku account API key",
+            "value": "",
+            "required": false
+        }
+    },
+    "buildpacks": [
+        {
+            "url": "heroku/python"
+        }
+    ],
+    "stack": "container"
+}
