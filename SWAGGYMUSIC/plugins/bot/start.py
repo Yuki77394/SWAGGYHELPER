@@ -18,11 +18,13 @@ import json
 import random
 import re
 import time
+from contextlib import suppress
 
 import aiohttp
 from pyrogram import filters
 from pyrogram.enums import ButtonStyle, ChatType
-from pyrogram.types import InlineKeyboardMarkup, Message
+from pyrogram.types import (CallbackQuery, InlineKeyboardMarkup,
+                            InputMediaPhoto, Message)
 
 import config
 from SWAGGYMUSIC import app
@@ -62,17 +64,18 @@ def _escape_html_ampersands(text: str) -> str:
     )
 
 
-def _build_start_caption(message: Message, template: str) -> str:
+def _build_start_caption(user, template: str) -> str:
     """Build a Bot-API-safe HTML caption from the language template.
 
-    The normal Kurigram ``mention`` strings are Telegram/MTProto formatted
-    strings.  This private /start panel is sent through the Bot API instead,
-    so construct the two placeholder mentions ourselves and HTML-escape only
+    Accepts a ``User`` object (``message.from_user`` for the /start command,
+    or ``callback.from_user`` for the Back-to-Start callback). The normal
+    Kurigram ``mention`` strings are Telegram/MTProto formatted strings —
+    this private /start panel is sent through the Bot API instead, so we
+    construct the two placeholder mentions ourselves and HTML-escape only
     the user-controlled display names.
     """
     template = _escape_html_ampersands(template)
 
-    user = message.from_user
     user_name = " ".join(
         part for part in (user.first_name, user.last_name) if part
     ).strip() or "User"
@@ -171,7 +174,7 @@ async def start_pm(client, message: Message, _):
         await _send_start_photo_with_effect(
             message=message,
             photo=random.choice(START_IMAGES),
-            caption=_build_start_caption(message, _["start_2"]),
+            caption=_build_start_caption(message.from_user, _["start_2"]),
             out=out,
         )
         if await is_on_off(2):
@@ -197,6 +200,62 @@ async def start_gp(client, message: Message, _):
         reply_markup=InlineKeyboardMarkup(out),
     )
     return await add_served_chat(message.chat.id)
+
+
+@app.on_callback_query(
+    filters.regex(r"^settingsback_helper$") & ~BANNED_USERS
+)
+async def back_to_start_home(client, query: CallbackQuery):
+    """Help-menu RED BACK button → restore the original /start home panel.
+
+    The Help menu's BACK button uses ``callback_data="settingsback_helper"``
+    (no underscore between ``settings`` and ``back``). This is intentionally
+    a DIFFERENT token from the Start panel's ``settings_back_helper`` and the
+    submenu's ``settings_back_helper`` — those route to ``helper_private``
+    which re-shows the help menu. This handler restores the Start photo.
+
+    The Help callback converted the Start photo message into a TEXT message
+    via ``edit_message_text``. Converting it back to a photo requires
+    ``edit_message_media`` with an ``InputMediaPhoto`` — using
+    ``edit_message_text`` would not work on a media-typed message.
+    """
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    try:
+        language = await get_lang(query.message.chat.id)
+        _ = get_string(language)
+    except Exception:
+        _ = get_string("en")
+
+    out = private_panel(_)
+    caption = _build_start_caption(query.from_user, _["start_2"])
+
+    try:
+        await query.edit_message_media(
+            media=InputMediaPhoto(
+                media=random.choice(START_IMAGES),
+                caption=caption,
+                has_spoiler=True,
+            ),
+            reply_markup=InlineKeyboardMarkup(out),
+        )
+    except Exception:
+        # Fallback: if the message is too old to edit (Telegram's 48h limit)
+        # or the photo URL is unreachable, fall back to deleting the help
+        # message and sending a fresh /start photo. This is a last resort —
+        # the normal path uses edit_message_media which preserves the
+        # original message position (no duplicate message).
+        with suppress(Exception):
+            await query.message.delete()
+        await _send_start_photo_with_effect(
+            message=query.message,
+            photo=random.choice(START_IMAGES),
+            caption=caption,
+            out=out,
+        )
 
 
 @app.on_message(filters.new_chat_members, group=-1)
