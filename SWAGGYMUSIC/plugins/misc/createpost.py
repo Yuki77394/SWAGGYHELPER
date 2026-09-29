@@ -28,6 +28,7 @@ from pyrogram.types import (
 import config
 from SWAGGYMUSIC import app
 from SWAGGYMUSIC.misc import SUDOERS
+from SWAGGYMUSIC.utils.activity_logger import log_createpost_attempt
 
 
 SESSIONS = {}
@@ -665,6 +666,7 @@ async def createpost_input(_, message: Message):
         # existing send path unchanged.
         if user_id not in SUDOERS:
             await _send_restriction_message(message)
+            await log_createpost_attempt(message.from_user)
             SESSIONS.pop(user_id, None)
             return
 
@@ -761,6 +763,7 @@ async def createpost_input(_, message: Message):
         # existing send path unchanged.
         if user_id not in SUDOERS:
             await _send_restriction_message(message)
+            await log_createpost_attempt(message.from_user)
             SESSIONS.pop(user_id, None)
             return
 

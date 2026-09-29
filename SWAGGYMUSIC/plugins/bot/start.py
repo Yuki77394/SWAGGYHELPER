@@ -29,9 +29,10 @@ from pyrogram.types import (CallbackQuery, InlineKeyboardMarkup,
 import config
 from SWAGGYMUSIC import app
 from SWAGGYMUSIC.misc import _boot_
+from SWAGGYMUSIC.utils.activity_logger import log_user_start
 from SWAGGYMUSIC.utils.database import (add_served_chat, add_served_user,
                                        blacklisted_chats, get_lang,
-                                       is_banned_user, is_on_off)
+                                       is_banned_user)
 from SWAGGYMUSIC.utils.decorators.language import LanguageStart
 from SWAGGYMUSIC.utils.formatters import get_readable_time
 from SWAGGYMUSIC.utils.inline import help_pannel, private_panel, start_panel
@@ -177,15 +178,9 @@ async def start_pm(client, message: Message, _):
             caption=_build_start_caption(message.from_user, _["start_2"]),
             out=out,
         )
-        if await is_on_off(2):
-            return await app.send_message(
-                chat_id=config.LOGGER_ID,
-                text=(
-                    f"{message.from_user.mention} ᴊᴜsᴛ sᴛᴀʀᴛᴇᴅ ᴛʜᴇ ʙᴏᴛ.\n\n"
-                    f"<b>ᴜsᴇʀ ɪᴅ :</b> <code>{message.from_user.id}</code>\n"
-                    f"<b>ᴜsᴇʀɴᴀᴍᴇ :</b> @{message.from_user.username}"
-                ),
-            )
+        # Centralized activity logger — checks is_on_off(2) internally
+        # and sends to config.LOGGER_ID.  Never raises, never duplicates.
+        await log_user_start(message.from_user)
 
 
 @app.on_message(filters.command(["start"]) & filters.group & ~BANNED_USERS)
