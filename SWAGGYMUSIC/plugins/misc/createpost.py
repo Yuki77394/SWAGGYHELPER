@@ -25,7 +25,9 @@ from pyrogram.types import (
     Message,
 )
 
+import config
 from SWAGGYMUSIC import app
+from SWAGGYMUSIC.misc import SUDOERS
 
 
 SESSIONS = {}
@@ -344,6 +346,72 @@ async def _bot_admin_status(chat_id: int):
     return True, None
 
 
+# ---------------------------------------------------------------------------
+# SUDO access restriction (final-stage gate)
+# ---------------------------------------------------------------------------
+#
+# Normal users are allowed to walk through the ENTIRE /createpost wizard
+# (post type, chat id, format, user id, colour, text, video URL, photo …)
+# but the actual final send operation is gated behind a SUDO check. This
+# keeps the wizard fully explorable while preventing unauthorized post
+# creation.
+#
+# The check uses the project's existing SUDO mechanism (SUDOERS filter
+# from SWAGGYMUSIC.misc) and the configured OWNER_ID from config.py — no
+# hardcoded user IDs, no new auth system.
+#
+# The restriction is enforced identically for BOTH final send paths:
+#   1. Hidden Preview  →  _send_hidden_preview()  (raw MTProto send)
+#   2. Normal Post     →  app.send_photo()        (Bot API send_photo)
+# There is no separate video-post final send in the current implementation;
+# Hidden Preview is the only video path. If a video send path is ever added
+# later, the same gate must be applied there too.
+
+
+RESTRICTION_TEXT = (
+    "🔒 <b>Fᴇᴀᴛᴜʀᴇ Rᴇsᴛʀɪᴄᴛᴇᴅ</b>\n\n"
+    "Tʜɪs ғᴇᴀᴛᴜʀᴇ ɪs ᴄᴜʀʀᴇɴᴛʟʏ ʀᴇsᴛʀɪᴄᴛᴇᴅ.\n\n"
+    "Tᴏ ᴜsᴇ <b>Cʀᴇᴀᴛᴇ Pᴏsᴛ</b>,\n"
+    "Pʟᴇᴀsᴇ ᴄᴏɴᴛᴀᴄᴛ\n"
+    f'<a href="tg://user?id={config.OWNER_ID}">ꜱᴡΛɢɢʏ™</a>\n'
+    "Fᴏʀ Aᴄᴄᴇss.\n\n"
+    "❌ Yᴏᴜʀ ᴘᴏsᴛ ᴡᴀs ɴᴏᴛ ᴄʀᴇᴀᴛᴇᴅ."
+)
+
+
+def _restriction_keyboard():
+    """Single 'Get Access' button that opens the owner's Telegram profile.
+
+    Uses ``user_id=`` (not ``url=``) so Pyrogram renders it as a user-mention
+    URL button — tapping it opens the owner's chat directly without firing
+    any bot callback. This matches the existing Owner button on the /start
+    panel (utils/inline/start.py).
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="Gᴇᴛ Aᴄᴄᴇss",
+                    user_id=config.OWNER_ID,
+                )
+            ]
+        ]
+    )
+
+
+async def _send_restriction_message(message: Message):
+    """Send the SUDO restriction message + 'Get Access' button.
+
+    The caller is responsible for popping the user's session AFTER this
+    returns, so the cleanup ordering matches the spec ('clean up the
+    session AFTER showing the restriction message').
+    """
+    await message.reply_text(
+        RESTRICTION_TEXT,
+        reply_markup=_restriction_keyboard(),
+    )
+
+
 @app.on_message(filters.command("createpost"))
 async def createpost_start(_, message: Message):
     if not message.from_user:
@@ -590,6 +658,18 @@ async def createpost_input(_, message: Message):
         session["video_url"] = video_url
         session["step"] = "hidden_sending"
 
+        # ─── SUDO gate (final stage) ─────────────────────────────────
+        # The user has completed every wizard step (post type, chat id,
+        # position, text, video URL). The very next operation is the
+        # actual final send via _send_hidden_preview(). Non-SUDO users
+        # must NOT reach that call — show the restriction message and
+        # clean up the session instead. SUDO users fall through to the
+        # existing send path unchanged.
+        if user_id not in SUDOERS:
+            await _send_restriction_message(message)
+            SESSIONS.pop(user_id, None)
+            return
+
         await message.reply_text("⏳ <b>Cʀᴇᴀᴛɪɴɢ Hɪᴅᴅᴇɴ Pʀᴇᴠɪᴇᴡ...</b>")
 
         try:
@@ -673,6 +753,19 @@ async def createpost_input(_, message: Message):
 
         session["photo"] = photo
         session["step"] = "sending"
+
+        # ─── SUDO gate (final stage) ─────────────────────────────────
+        # The user has completed every wizard step (post type, chat id,
+        # format, user id, colour, photo). The very next operation is
+        # the actual final send via app.send_photo(). Non-SUDO users
+        # must NOT reach that call — show the restriction message and
+        # clean up the session instead. SUDO users fall through to the
+        # existing send path unchanged.
+        if user_id not in SUDOERS:
+            await _send_restriction_message(message)
+            SESSIONS.pop(user_id, None)
+            return
+
         await message.reply_text("⏳ <b>Cʀᴇᴀᴛɪɴɢ Yᴏᴜʀ Pᴏsᴛ...</b>")
 
         try:
