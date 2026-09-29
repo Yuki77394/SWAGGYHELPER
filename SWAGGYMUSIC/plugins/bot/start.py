@@ -27,7 +27,6 @@ from pyrogram.types import InlineKeyboardMarkup, Message
 import config
 from SWAGGYMUSIC import app
 from SWAGGYMUSIC.misc import _boot_
-from SWAGGYMUSIC.plugins.sudo.sudoers import sudoers_list
 from SWAGGYMUSIC.utils.database import (add_served_chat, add_served_user,
                                        blacklisted_chats, get_lang,
                                        is_banned_user, is_on_off)
@@ -167,19 +166,6 @@ async def start_pm(client, message: Message, _):
                 caption=_["help_1"].format(config.SUPPORT_CHAT),
                 reply_markup=keyboard,
             )
-        if name[0:3] == "sud":
-            await sudoers_list(client=client, message=message, _=_)
-            if await is_on_off(2):
-                return await app.send_message(
-                    chat_id=config.LOGGER_ID,
-                    text=(
-                        f"{message.from_user.mention} ᴊᴜsᴛ sᴛᴀʀᴛᴇᴅ ᴛʜᴇ ʙᴏᴛ ᴛᴏ "
-                        "<b>sᴜᴅᴏʟɪsᴛ</b>.\n\n"
-                        f"<b>ᴜsᴇʀ ɪᴅ :</b> <code>{message.from_user.id}</code>\n"
-                        f"<b>ᴜsᴇʀɴᴀᴍᴇ :</b> @{message.from_user.username}"
-                    ),
-                )
-            return
     else:
         out = private_panel(_)
         await _send_start_photo_with_effect(
