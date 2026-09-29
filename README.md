@@ -21,10 +21,11 @@
 `/setdelay on` and `/setgap on` are intentionally **invalid** — the bot replies
 with the help text.
 
-Other commands preserved from the original SWAGGYMUSIC:
-`/start`, `/help`, `/privacy`, `/addsudo`, `/delsudo`, `/sudolist`,
-`/blacklistchat`, `/whitelistchat`, `/block`, `/unblock`, `/maintenance`,
-`/logger`.
+All user-facing commands:
+
+`/start`, `/help`, `/privacy`, `/setdelay`, `/setgap`, `/createpost`, `/cancel`
+
+(`/cancel` is part of the Create Post workflow.)
 
 ---
 
@@ -51,13 +52,13 @@ Other commands preserved from the original SWAGGYMUSIC:
 
 💬 **Support Group:** [SpicyxNetwork](https://t.me/SpIcYxNeTwOrK)
 📢 **Update Channel:** [SWAGGYMUSIC](https://t.me/+sTyS-zKwUIk4YWI1)
-📂 **GitHub Issues:** [Report a Problem](https://github.com/Yuki77394/KURIGRAMSWAG/issues/new)
+📂 **GitHub Issues:** [Report a Problem](https://github.com/Yuki77394/SWAGGYHELPER/issues/new)
 
 ---
 
 ## 📜 License
 
-This project is licensed under the **GNU v3.0 License Agreement** — see the
+This project is licensed under the **MIT License** — see the
 [LICENSE](LICENSE) file for details.
 
 ---
@@ -66,7 +67,7 @@ This project is licensed under the **GNU v3.0 License Agreement** — see the
 
 ### 🔹 1. Heroku (one-click)
 
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/Yuki77394/KURIGRAMSWAG)
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/Yuki77394/SWAGGYHELPER)
 
 Required env vars: `API_ID`, `API_HASH`, `BOT_TOKEN`, `MONGO_DB_URI`,
 `OWNER_ID`, `LOGGER_ID`. Optional: `HEROKU_APP_NAME`, `HEROKU_API_KEY`,
@@ -76,8 +77,8 @@ Required env vars: `API_ID`, `API_HASH`, `BOT_TOKEN`, `MONGO_DB_URI`,
 
 ```bash
 sudo apt update && sudo apt install -y git python3-pip tmux nano
-git clone https://github.com/Yuki77394/KURIGRAMSWAG.git
-cd KURIGRAMSWAG
+git clone https://github.com/Yuki77394/SWAGGYHELPER.git
+cd SWAGGYHELPER
 pip install -r requirements.txt   # or: pip install -e .
 cp sample.env .env && nano .env
 tmux
@@ -104,7 +105,7 @@ the Procfile.
 ## 🗂 Project layout
 
 ```
-KURIGRAMSWAG/
+SWAGGYHELPER/
 ├── SWAGGYMUSIC/
 │   ├── __init__.py           # app = Alone()
 │   ├── __main__.py           # asyncio entrypoint — imports all plugins
@@ -123,7 +124,6 @@ KURIGRAMSWAG/
 │   └── plugins/
 │       ├── __init__.py       # auto-discovery of plugins/*/*.py
 │       ├── bot/{start,help,privacy}.py
-│       ├── sudo/sudoers.py
 │       └── misc/{autodelete,createpost}.py
 ├── strings/
 │   ├── __init__.py
@@ -149,7 +149,7 @@ Apple/Resso/Youtube/Carbon/Telegram), `utils/stream/*`, `utils/music_cache.py`,
 `plugins/play/*`, `plugins/admins/*`, `plugins/audio_effects/*`,
 `plugins/tools/*`, `plugins/bot/{inline,settings,thumb}.py`,
 `plugins/misc/{Swaggy_reply,seeker,watcher,autoleave,broadcast,Sent}.py`,
-`plugins/sudo/{blchat,block,autoend,gban,logger,maintenance,restart}.py`.
+`plugins/sudo/*`.
 
 Kept dependencies (see `requirements.txt`): kurigram, motor, aiohttp,
 GitPython, heroku3, humanize, psutil, Pillow, PyYAML, python-dotenv.

@@ -20,9 +20,3 @@ services:
         value: ""
       - key: OWNER_ID
         value: ""
-      - key: UPSTREAM_REPO
-        value: "https://github.com/Yuki77394/KURIGRAMSWAG"
-      - key: UPSTREAM_BRANCH
-        value: "main"
-      - key: GIT_TOKEN
-        sync: false

@@ -1,9 +1,9 @@
 #
-# Copyright (C) 2021-2022 by SWAGGYMUSIC@Github, < https://github.com/Yuki77394/KURIGRAMSWAG >.
+# Copyright (C) 2021-2022 by SWAGGYMUSIC@Github, < https://github.com/Yuki77394/SWAGGYHELPER >.
 #
-# This file is part of < https://github.com/Yuki77394/KURIGRAMSWAG > project,
-# and is released under the "GNU v3.0 License Agreement".
-# Please see < https://github.com/Yuki77394/KURIGRAMSWAG/blob/master/LICENSE >
+# This file is part of < https://github.com/Yuki77394/SWAGGYHELPER > project,
+# and is released under the "MIT License".
+# Please see < https://github.com/Yuki77394/SWAGGYHELPER/blob/main/LICENSE >
 # All rights reserved.
 #
 # Standalone channel-management build configuration. Music-only
@@ -73,14 +73,6 @@ PING_IMG_URL = getenv("PING_IMG_URL", get_thumb())
 # restart the Heroku dyno.
 HEROKU_APP_NAME = getenv("HEROKU_APP_NAME")
 HEROKU_API_KEY = getenv("HEROKU_API_KEY")
-
-# ─── Upstream repo (reserved; not used by the standalone build) ──────────────
-UPSTREAM_REPO = getenv(
-    "UPSTREAM_REPO",
-    "https://github.com/Yuki77394/KURIGRAMSWAG",
-)
-UPSTREAM_BRANCH = getenv("UPSTREAM_BRANCH", "main")
-GIT_TOKEN = getenv("GIT_TOKEN", None)
 
 # ─── Privacy policy link ────────────────────────────────────────────────────
 PRIVACY_LINK = getenv(

@@ -50,8 +50,8 @@ include = ["SWAGGYMUSIC*", "strings*"]
 py-modules = ["config"]
 
 [project.urls]
-Repository = "https://github.com/Yuki77394/KURIGRAMSWAG"
-Issues = "https://github.com/Yuki77394/KURIGRAMSWAG/issues"
+Repository = "https://github.com/Yuki77394/SWAGGYHELPER"
+Issues = "https://github.com/Yuki77394/SWAGGYHELPER/issues"
 
 [project.scripts]
 swaggymusic = "SWAGGYMUSIC.__main__:main"
