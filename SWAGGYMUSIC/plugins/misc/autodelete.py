@@ -109,6 +109,26 @@ _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smh])\s*$", re.IGNORECASE)
 _CHANNEL_RESPONSE_TTL = 120
 
 
+async def _delete_command_message(message: Message, *, reason: str = "COMMAND_CLEANUP") -> None:
+    """Delete a command message from the channel and log the deletion reason.
+
+    Used by the /setgap and /setdelay channel-side handlers to clean up
+    the user's command message after processing. The structured log line
+    distinguishes this from GAP_REJECT and SETDELAY_EXPIRED deletions.
+
+    Never raises — deletion failures (e.g. message already gone) are
+    suppressed.
+    """
+    with suppress(Exception):
+        await message.delete()
+    log.info(
+        "deletion reason=%s chat=%s msg=%s",
+        reason,
+        getattr(getattr(message, "chat", None), "id", "?"),
+        getattr(message, "id", "?"),
+    )
+
+
 async def _delete_after(message: Message, delay: int) -> None:
     """Non-blocking delayed deletion helper.
 
@@ -125,6 +145,15 @@ async def _delete_after(message: Message, delay: int) -> None:
             await asyncio.sleep(delay)
             with suppress(Exception):
                 await message.delete()
+            # Structured deletion-reason log — BOT_REPLY_CLEANUP.
+            # This is the 120-second auto-cleanup of the bot's own
+            # success reply (e.g. "Successfully updated gap to 5m!").
+            # It is NOT a gap-reject or delay-expiry deletion.
+            log.info(
+                "deletion reason=BOT_REPLY_CLEANUP chat=%s msg=%s",
+                getattr(getattr(message, "chat", None), "id", "?"),
+                getattr(message, "id", "?"),
+            )
         except Exception:
             pass
 
@@ -667,6 +696,14 @@ async def _delete_worker():
 
                 try:
                     await app.delete_messages(chat_id, message_id)
+                    # Structured deletion-reason log — SETDELAY_EXPIRED.
+                    # This identifies WHICH component deleted the message
+                    # and WHY, so operators can distinguish gap-reject
+                    # deletions from delay-expiry deletions in the logs.
+                    log.info(
+                        "deletion reason=SETDELAY_EXPIRED chat=%s msg=%s",
+                        chat_id, message_id,
+                    )
                     # Success: remove the temporary job immediately.
                     with suppress(Exception):
                         await jobs_db.delete_one({"_id": job_id})
@@ -807,8 +844,7 @@ async def setdelay_handler(_, message: Message):
 
     # `/setdelay on` is intentionally invalid — delete command + show error.
     if value.lower() == "on":
-        with suppress(Exception):
-            await message.delete()
+        await _delete_command_message(message, reason="COMMAND_CLEANUP_SETDELAY_INVALID")
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_DELAY)
         return
@@ -822,14 +858,12 @@ async def setdelay_handler(_, message: Message):
     # The ONLY way to disable SETDELAY is via the bot's private chat:
     #   /setdelay → Channel ID → 🔴 DISABLE
     if value.lower() == "off":
-        with suppress(Exception):
-            await message.delete()
+        await _delete_command_message(message, reason="COMMAND_CLEANUP_SETDELAY_OFF")
         return
 
     seconds = _parse_duration(value)
     if seconds is None:
-        with suppress(Exception):
-            await message.delete()
+        await _delete_command_message(message, reason="COMMAND_CLEANUP_SETDELAY_INVALID")
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_DELAY)
         return
@@ -852,8 +886,7 @@ async def setdelay_handler(_, message: Message):
     )
 
     # Delete the user's command immediately (channel-side auto-cleanup).
-    with suppress(Exception):
-        await message.delete()
+    await _delete_command_message(message, reason="COMMAND_CLEANUP_SETDELAY_SUCCESS")
 
     # Send success response — it will be auto-deleted after 120 seconds
     # via the non-blocking _delete_after helper.
@@ -909,8 +942,7 @@ async def setgap_handler(_, message: Message):
     value = parts[1].strip() if len(parts) == 2 else ""
 
     if value.lower() == "on":
-        with suppress(Exception):
-            await message.delete()
+        await _delete_command_message(message, reason="COMMAND_CLEANUP_SETGAP_INVALID")
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_GAP)
         return
@@ -924,14 +956,12 @@ async def setgap_handler(_, message: Message):
     # The ONLY way to disable SETGAP is via the bot's private chat:
     #   /setgap → Channel ID → 🔴 DISABLE
     if value.lower() == "off":
-        with suppress(Exception):
-            await message.delete()
+        await _delete_command_message(message, reason="COMMAND_CLEANUP_SETGAP_OFF")
         return
 
     seconds = _parse_duration(value)
     if seconds is None:
-        with suppress(Exception):
-            await message.delete()
+        await _delete_command_message(message, reason="COMMAND_CLEANUP_SETGAP_INVALID")
         with suppress(Exception):
             await message.reply_text(INVALID_TEXT_GAP)
         return
@@ -962,8 +992,7 @@ async def setgap_handler(_, message: Message):
     )
 
     # Delete the user's command immediately (channel-side auto-cleanup).
-    with suppress(Exception):
-        await message.delete()
+    await _delete_command_message(message, reason="COMMAND_CLEANUP_SETGAP_SUCCESS")
 
     # Send success response — it will be auto-deleted after 120 seconds
     # via the non-blocking _delete_after helper.
@@ -1082,6 +1111,15 @@ async def autodelete_new_channel_post(_, message: Message):
                 # rate-limit errors (Issue 7). Other exceptions (message
                 # already gone, chat removed, etc.) are suppressed but
                 # logged at INFO so the operator can see them.
+                #
+                # Structured deletion-reason log — GAP_REJECT. This
+                # identifies WHICH component deleted the message and WHY,
+                # so operators can distinguish gap-reject deletions from
+                # delay-expiry deletions in the logs.
+                log.info(
+                    "deletion reason=GAP_REJECT chat=%s msg=%s post_time=%s gap=%s",
+                    message.chat.id, message.id, post_time, gap,
+                )
                 try:
                     await app.delete_messages(message.chat.id, message.id)
                 except FloodWait as exc:
