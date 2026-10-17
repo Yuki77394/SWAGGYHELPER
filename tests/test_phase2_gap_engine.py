@@ -143,60 +143,62 @@ class TestGapCoreLogic:
 # ---------------------------------------------------------------------------
 
 class TestStaleReferenceRecovery:
-    """Tests for _resolve_stale_gap_reference (Part 1 fix for Issue 4)."""
+    """Tests for _resolve_stale_gap_reference — manual deletion of accepted posts.
 
-    async def test_05_manual_deletion_of_reference_does_not_clear_timestamp(self):
-        """Issue 4: when the reference message is gone, the stored timestamp
-        MUST be preserved (NOT cleared) so the gap window is not reset.
+    Rule: if the latest accepted post is deleted manually, the gap is measured
+    from the most recent EARLIER accepted post that still exists, using that
+    post's original Telegram timestamp. Candidates come from the persisted
+    accepted-post history (``gap_history``) — bots cannot read channel history
+    (``get_chat_history`` -> BOT_METHOD_INVALID).
+
+    (These tests replace the earlier "keep the deleted post's timestamp" /
+    "never adopt a post outside the window" expectations, which contradicted
+    this rule and were already failing against the previous code.)
+    """
+
+    async def test_05_manual_deletion_of_only_reference_releases_gap(self):
+        """The only accepted post was deleted manually and no earlier accepted
+        post exists: the stale reference is cleared so the deleted post no
+        longer blocks the channel, and the next post is allowed.
         """
         from SWAGGYMUSIC.plugins.misc.autodelete import (
             _gap_allows_post,
             _resolve_stale_gap_reference,
-            _message_exists,
         )
-        from SWAGGYMUSIC.utils.database import settings_db
+        from SWAGGYMUSIC import app
 
         await _enable_gap(-100121, gap=900)
         # First post accepted at t=1000, msg_id=1
-        await _gap_allows_post(-100121, 1000, 900, 1)
+        assert await _gap_allows_post(-100121, 1000, 900, 1) is True
 
-        # Simulate manual deletion: _message_exists returns False.
-        # Patch it via the app.get_messages mock.
-        from SWAGGYMUSIC import app
+        # Simulate manual deletion: Telegram returns an empty message.
         deleted_msg = MagicMock()
         deleted_msg.empty = True
         deleted_msg.date = None
         app.get_messages = AsyncMock(return_value=deleted_msg)
 
-        # Also stub get_chat_history to return no surviving posts.
-        async def _empty_history(*a, **kw):
-            if False:  # never yields
-                yield
-        app.get_chat_history = _empty_history
-
-        # Build a "new incoming post" mock at t=1100 (inside the gap).
+        # Build a "new incoming post" mock at t=1100 (inside the old gap).
         new_msg = MagicMock()
         new_msg.id = 2
         new_msg.chat = MagicMock()
         new_msg.chat.id = -100121
 
-        # Run stale-reference resolution.
         await _resolve_stale_gap_reference(-100121, new_msg, gap=900, current_post_time=1100)
 
-        # The stored timestamp MUST still be 1000 (NOT cleared).
         s = await _get_settings(-100121)
-        assert s.get("last_gap_post_at") == 1000, \
-            "Stale reference must NOT clear last_gap_post_at (Part 1 fix)"
-        assert s.get("last_gap_post_msg_id") is not None, \
-            "Stale reference must NOT clear last_gap_post_msg_id"
+        assert "last_gap_post_at" not in s, "deleted reference must be cleared"
+        assert "last_gap_post_msg_id" not in s
+        assert s.get("gap_history") == [], "deleted post must leave the history"
 
-        # Consequently, a post at t=1100 (inside the gap) must still be rejected.
-        accepted = await _gap_allows_post(-100121, 1100, 900, 2)
-        assert accepted is False, "Post inside gap must be rejected even after ref deleted"
+        # Consequently, the post at t=1100 is allowed and becomes the reference.
+        assert await _gap_allows_post(-100121, 1100, 900, 2) is True
+        s = await _get_settings(-100121)
+        assert s["last_gap_post_at"] == 1100 and s["last_gap_post_msg_id"] == 2
 
-    async def test_06_missing_reference_recovery_uses_surviving_post_in_window(self):
-        """Issue 4 point 4-5: if a surviving post WITHIN the gap window exists,
-        adopt it as the new reference (refreshing the message_id pointer).
+    async def test_06_manual_deletion_falls_back_to_earlier_accepted_post(self):
+        """Accepted: msg 5 at t=100 and msg 9 at t=1000. Msg 9 is deleted
+        manually. A post at t=1100 is measured from msg 5 — using msg 5's
+        original timestamp (100) — and is therefore allowed.
         """
         from SWAGGYMUSIC.plugins.misc.autodelete import (
             _gap_allows_post,
@@ -205,43 +207,41 @@ class TestStaleReferenceRecovery:
         from SWAGGYMUSIC import app
 
         await _enable_gap(-100122, gap=900)
-        # Original accepted post: t=1000, msg_id=1
-        await _gap_allows_post(-100122, 1000, 900, 1)
+        assert await _gap_allows_post(-100122, 100, 900, 5) is True
+        assert await _gap_allows_post(-100122, 1000, 900, 9) is True
 
-        # Simulate: msg 1 is gone, but msg 5 (a surviving post at t=1050)
-        # exists within the gap window (1050 >= 1100 - 900 = 200).
-        deleted_msg = MagicMock()
-        deleted_msg.empty = True
-        deleted_msg.date = None
-        app.get_messages = AsyncMock(return_value=deleted_msg)
-
-        surviving = MagicMock()
-        surviving.id = 5
-        surviving.date = datetime.fromtimestamp(1050, tz=timezone.utc)
-        surviving.empty = False
-
-        async def _history_with_surviving(*a, **kw):
-            yield surviving
-        app.get_chat_history = _history_with_surviving
+        async def _get_messages(chat_id, message_id, **kwargs):
+            msg = MagicMock()
+            msg.id = message_id
+            if message_id == 9:  # deleted manually
+                msg.empty = True
+                msg.date = None
+            else:
+                msg.empty = None
+                msg.date = datetime.fromtimestamp(100, tz=timezone.utc)
+            return msg
+        app.get_messages = AsyncMock(side_effect=_get_messages)
 
         new_msg = MagicMock()
         new_msg.id = 10
         new_msg.chat = MagicMock()
         new_msg.chat.id = -100122
 
-        # current_post_time = 1100, gap = 900, cutoff = 200.
-        # surviving ts = 1050, which is > cutoff (200) and > stored_ts (1000) → adopt.
         await _resolve_stale_gap_reference(-100122, new_msg, gap=900, current_post_time=1100)
 
         s = await _get_settings(-100122)
-        # The reference should be refreshed to the surviving post.
         assert s["last_gap_post_msg_id"] == 5
-        assert s["last_gap_post_at"] == 1050
+        assert s["last_gap_post_at"] == 100, "original Telegram timestamp of msg 5"
+        assert [e["msg_id"] for e in s["gap_history"]] == [5]
+        # 1100 - 100 >= 900 -> allowed.
+        assert await _gap_allows_post(-100122, 1100, 900, 10) is True
 
-    async def test_06b_surviving_post_outside_gap_window_not_adopted(self):
-        """A surviving post OLDER than the gap window must NOT be adopted
-        (Issue 2 root cause: pre-Part-1 this would adopt an arbitrarily
-        old post and bypass the gap)."""
+    async def test_06b_surviving_message_that_was_never_accepted_is_ignored(self):
+        """A message that still exists in the channel but was never ACCEPTED
+        (a rejected post whose deletion failed, a command, a bot reply ...)
+        must never become the gap reference — the channel history is not
+        scanned for "any surviving message" any more.
+        """
         from SWAGGYMUSIC.plugins.misc.autodelete import (
             _gap_allows_post,
             _resolve_stale_gap_reference,
@@ -249,18 +249,18 @@ class TestStaleReferenceRecovery:
         from SWAGGYMUSIC import app
 
         await _enable_gap(-100123, gap=900)
-        await _gap_allows_post(-100123, 1000, 900, 1)
+        assert await _gap_allows_post(-100123, 1000, 900, 1) is True
 
-        # deleted msg 1
+        # Accepted msg 1 deleted manually.
         deleted_msg = MagicMock()
         deleted_msg.empty = True
         deleted_msg.date = None
         app.get_messages = AsyncMock(return_value=deleted_msg)
 
-        # Surviving post at t=100 (way older than cutoff=200)
+        # A non-accepted message (id 5, t=1050) still exists in the channel.
         surviving = MagicMock()
         surviving.id = 5
-        surviving.date = datetime.fromtimestamp(100, tz=timezone.utc)
+        surviving.date = datetime.fromtimestamp(1050, tz=timezone.utc)
         surviving.empty = False
 
         async def _history(*a, **kw):
@@ -272,13 +272,12 @@ class TestStaleReferenceRecovery:
         new_msg.chat = MagicMock()
         new_msg.chat.id = -100123
 
-        # current_post_time=1100, gap=900, cutoff=200. surviving ts=100 < cutoff → keep stored.
         await _resolve_stale_gap_reference(-100123, new_msg, gap=900, current_post_time=1100)
 
         s = await _get_settings(-100123)
-        # The stored timestamp must be preserved (1000), NOT replaced with 100.
-        assert s["last_gap_post_at"] == 1000, \
-            "Surviving post outside gap window must not be adopted"
+        assert s.get("last_gap_post_msg_id") != 5, "non-accepted message adopted"
+        assert "last_gap_post_at" not in s
+        assert await _gap_allows_post(-100123, 1100, 900, 10) is True
 
 
 # ---------------------------------------------------------------------------
@@ -512,15 +511,18 @@ class TestRestartRecovery:
         from SWAGGYMUSIC.plugins.misc.autodelete import _queue_delete
         from SWAGGYMUSIC.utils.database import jobs_db
 
-        # Queue a job.
-        await _queue_delete(-100171, 42, delay=60, original_post_time=1000)
+        # Queue a job. Use a current timestamp: with a 1970-era one the job's
+        # expires_at is already past, and once any test has created the TTL
+        # index, mongomock reaps such a job immediately (order-dependent).
+        t0 = int(time.time())
+        await _queue_delete(-100171, 42, delay=60, original_post_time=t0)
 
         # The job is in the DB.
         job = await jobs_db.find_one({"chat_id": -100171, "message_id": 42})
         assert job is not None
-        assert job["delete_at"] == 1060  # 1000 + 60
+        assert job["delete_at"] == t0 + 60
         assert job["attempts"] == 0
-        assert job["original_post_time"] == 1000
+        assert job["original_post_time"] == t0
 
         # expires_at must be a BSON Date (Part 2 fix).
         from datetime import datetime
@@ -534,12 +536,13 @@ class TestRestartRecovery:
         from SWAGGYMUSIC.plugins.misc.autodelete import _queue_delete
         from SWAGGYMUSIC.utils.database import jobs_db
 
-        await _queue_delete(-100172, 43, delay=60, original_post_time=1000)
+        t0 = int(time.time())  # current: see test_11 (TTL reaping)
+        await _queue_delete(-100172, 43, delay=60, original_post_time=t0)
         # Re-queue with a DIFFERENT delay — must NOT change delete_at.
-        await _queue_delete(-100172, 43, delay=999, original_post_time=1000)
+        await _queue_delete(-100172, 43, delay=999, original_post_time=t0)
 
         job = await jobs_db.find_one({"chat_id": -100172, "message_id": 43})
-        assert job["delete_at"] == 1060, "delete_at must be immutable after first insert"
+        assert job["delete_at"] == t0 + 60, "delete_at must be immutable after first insert"
 
 
 # ---------------------------------------------------------------------------

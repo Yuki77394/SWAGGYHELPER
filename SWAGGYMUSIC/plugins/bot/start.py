@@ -209,10 +209,9 @@ async def back_to_start_home(client, query: CallbackQuery):
     submenu's ``settings_back_helper`` — those route to ``helper_private``
     which re-shows the help menu. This handler restores the Start photo.
 
-    The Help callback converted the Start photo message into a TEXT message
-    via ``edit_message_text``. Converting it back to a photo requires
-    ``edit_message_media`` with an ``InputMediaPhoto`` — using
-    ``edit_message_text`` would not work on a media-typed message.
+    The Help callbacks preserve the Start photo and edit only its caption.
+    This Back button restores the full Start panel, so it replaces the media
+    with ``edit_message_media`` and its original keyboard/caption.
     """
     try:
         await query.answer()

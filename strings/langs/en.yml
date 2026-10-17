@@ -42,10 +42,11 @@ S_B_3 : "ᴀᴅᴅ ᴍє ɪɴ ʏᴏᴜʀ ɢʀᴏᴜᴘ"
 S_B_4 : "ʜєʟᴘ & ᴄᴏᴍᴍᴀɴᴅs"
 S_B_9 : "sᴜᴘᴘᴏʀᴛ"
 
-# Help-panel category labels — only the three surviving features.
+# Help-panel category labels (2 rows x 2 buttons).
 H_B_1 : "sєᴛ ᴅєʟᴀʏ"
 H_B_2 : "sєᴛ ɢᴀᴘ"
 H_B_3 : "ᴄʀєᴀᴛє ᴘᴏsᴛ"
+H_B_4 : "ᴀɴᴏɴʏᴍᴏᴜs ᴘᴏsᴛ"
 
 # ─── Sudo system strings (kept for parity; sudo plugin still works) ────────
 sudo_1 : "» {0} ɪs ᴀʟʀєᴀᴅʏ ɪɴ sᴜᴅᴏ ᴜsєʀs ʟɪsᴛ."

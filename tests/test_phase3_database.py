@@ -529,8 +529,12 @@ class TestConfigValidation:
         old_env = dict(os.environ)
         os.environ.update(env)
         try:
+            config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config.py",
+            )
             spec = importlib.util.spec_from_file_location(
-                f"test_config_{id(env)}", "/home/z/my-project/SWAGGYHELPER/config.py"
+                f"test_config_{id(env)}", config_path
             )
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)

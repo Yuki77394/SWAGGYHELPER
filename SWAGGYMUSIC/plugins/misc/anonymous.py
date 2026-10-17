@@ -1,22 +1,28 @@
 """Channel anonymous/Send-As post filter.
 
 /setanonymous -> enter channel ID -> ENABLE/DISABLE buttons.
-When enabled, posts whose sender identity is a chat/channel rather than an
-identifiable user are deleted. Telegram does not expose the real admin ID
-for these posts, so this filter cannot identify the human behind them.
+When enabled, only posts with a Telegram-exposed personal-account sender
+are kept. Channel/chat identity posts and posts with unknown sender metadata
+are deleted; service messages are left alone. Telegram does not expose the
+real admin ID behind channel-identity posts, so this filter cannot identify
+the human behind them.
+
+Policy and /setgap coordination: SWAGGYMUSIC/utils/anonymous_policy.py.
 """
 
 import asyncio
+import time
 from contextlib import suppress
 
 from pyrogram import filters
 from pyrogram.enums import ButtonStyle, ChatMemberStatus, ChatType
-from pyrogram.errors import RPCError
+from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from SWAGGYMUSIC import app
 from SWAGGYMUSIC.logging import LOGGER
-from SWAGGYMUSIC.utils.database import settings_db
+from SWAGGYMUSIC.utils import anonymous_policy
+from SWAGGYMUSIC.utils.database import queue_deletion_job, settings_db
 from SWAGGYMUSIC.utils.permissions import verify_channel_admin
 
 log = LOGGER(__name__)
@@ -101,7 +107,8 @@ async def setanonymous_callback(_, query: CallbackQuery):
                 f"🛡️ <b>ANONYMOUS POST PROTECTION {status}</b>\n\n"
                 f"📌 <b>Channel:</b> {chat.title or 'Channel'}\n"
                 f"🆔 <b>Channel ID:</b> <code>{channel_id}</code>\n\n"
-                + ("Posts without an identifiable personal sender will be deleted when Telegram exposes them as chat/channel-sent posts.\n\n" if enabled else "Protection is now turned off.\n\n")
+                + ("Only posts whose personal account Telegram exposes are kept. Channel/chat identity posts "
+                   "and posts with unknown sender information are deleted.\n\n" if enabled else "Protection is now turned off.\n\n")
                 + "<i>Telegram may not reveal the real admin behind a channel-identity post; this filter cannot recover that identity.</i>"
             )
         SESSIONS.pop(user_id, None)
@@ -155,39 +162,90 @@ async def setanonymous_channel_input(_, message: Message):
     )
 
 
+def _post_time(message: Message) -> int:
+    with suppress(AttributeError, OSError, ValueError):
+        return int(message.date.timestamp())
+    return int(time.time())
+
+
 @app.on_message(filters.channel & filters.incoming, group=-30)
 async def anonymous_post_filter(_, message: Message):
-    """Delete channel-identity posts that have no visible author signature.
+    """Reject chat-identity posts while /setanonymous is enabled.
 
-    Telegram generally does not expose the human admin who published a channel
-    post. This rule therefore checks the visible author signature, not the real
-    admin identity. A channel post with no signature is deleted when sender_chat
-    is present and from_user is absent. Posts with an author_signature are kept.
+    Policy (anonymous_policy.should_reject_anonymous_post):
+      * posts whose personal account Telegram exposes (raw ``from_id`` is a
+        user) are allowed;
+      * posts sent with this channel's or another chat's identity are rejected;
+      * unknown sender metadata is rejected (fail closed); service messages
+        are exempt. An ``author_signature`` is free text, not an account.
+    Telegram does not reveal the human admin behind a chat-identity post, so
+    this filter never claims to identify one: it logs only the sender chat
+    Telegram reported.
+
+    Runs in group -30, before the /setgap engine (group 0) handles the same
+    update. The verdict is recorded BEFORE any Telegram call, so a rejected
+    post can never become a /setgap reference — even if deleting it fails.
+    Propagation is not stopped: the channel /setgap and /setdelay command
+    handlers still process command posts.
     """
     try:
         if message.chat.type != ChatType.CHANNEL or getattr(message, "outgoing", False):
             return
         if getattr(message, "edit_date", None) is not None:
             return
+        if not anonymous_policy.should_reject_anonymous_post(message):
+            return
         setting = await settings_db.find_one({"chat_id": message.chat.id}, {"anonymous_filter_enabled": 1})
         if not setting or not setting.get("anonymous_filter_enabled"):
             return
-        sender_chat = getattr(message, "sender_chat", None)
-        sender_user = getattr(message, "from_user", None)
-        # Personal-user posts are allowed. For channel-identity posts, keep
-        # only those with a visible author signature; missing signatures are
-        # the condition this feature is designed to remove.
-        author_signature = (getattr(message, "author_signature", None) or "").strip()
-        if sender_chat is not None and sender_user is None and not author_signature:
-            member = await app.get_chat_member(message.chat.id, app.id)
-            privileges = getattr(member, "privileges", None)
-            can_delete = member.status == ChatMemberStatus.OWNER or bool(
-                member.status == ChatMemberStatus.ADMINISTRATOR
-                and privileges and privileges.can_delete_messages
+
+        # Verdict first: in-process for the later handler groups of this
+        # update, then in MongoDB for the /setgap engine's atomic accept.
+        anonymous_policy.mark_rejected(message.chat.id, message.id)
+        try:
+            await anonymous_policy.record_rejection(message.chat.id, message.id)
+        except Exception as exc:
+            log.warning(
+                "anonymous verdict not persisted chat=%s message=%s: %s: %s",
+                message.chat.id, message.id, type(exc).__name__, exc,
             )
-            if can_delete:
-                await message.delete()
-                log.info("anonymous post deleted chat=%s message=%s sender_chat=%s", message.chat.id, message.id, getattr(sender_chat, "id", None))
+
+        member = await app.get_chat_member(message.chat.id, app.id)
+        privileges = getattr(member, "privileges", None)
+        can_delete = member.status == ChatMemberStatus.OWNER or bool(
+            member.status == ChatMemberStatus.ADMINISTRATOR
+            and privileges and privileges.can_delete_messages
+        )
+        if not can_delete:
+            log.warning(
+                "anonymous post rejected but not deleted (no Delete Messages right) chat=%s message=%s",
+                message.chat.id, message.id,
+            )
+            return
+        try:
+            await message.delete()
+        except FloodWait as exc:
+            # Telegram refused for now: queue a persistent retry for the
+            # deletion worker instead of leaving the rejected post up.
+            wait = min(max(int(getattr(exc, "value", 0) or 0), 1), 3600)
+            await queue_deletion_job(
+                message.chat.id, message.id,
+                delete_at=int(time.time()) + wait,
+                original_post_time=_post_time(message),
+                reason="ANON_REJECT_RETRY",
+            )
+            log.warning(
+                "anonymous post delete FloodWait chat=%s message=%s wait=%ss; retry queued",
+                message.chat.id, message.id, wait,
+            )
+            return
+        log.info(
+            "anonymous post deleted chat=%s message=%s identity=%s sender_chat=%s "
+            "(chat identity; Telegram does not reveal which admin sent it)",
+            message.chat.id, message.id,
+            anonymous_policy.sender_identity(message),
+            anonymous_policy.sender_chat_id(message),
+        )
     except RPCError as exc:
         log.warning("anonymous filter Telegram error chat=%s message=%s: %s", message.chat.id, message.id, exc)
     except Exception as exc:

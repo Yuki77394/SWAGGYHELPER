@@ -7,10 +7,10 @@
 #
 # /help handler — standalone channel-management build.
 #
-# The Help panel exposes ONLY the three remaining features:
-#     Set Delay   (hb1)
-#     Set Gap     (hb2)
-#     Create Post (hb3)
+# The Help panel exposes the four channel-management features
+# (2 rows x 2 buttons):
+#     Set Delay   (hb1)      Set Gap        (hb2)
+#     Create Post (hb3)      Anonymous Post (hb4, /setanonymous)
 # All music-related buttons and helper pages have been removed.
 
 from typing import Union
@@ -25,6 +25,29 @@ from SWAGGYMUSIC.utils.decorators.language import LanguageStart, languageCB
 from SWAGGYMUSIC.utils.inline.help import help_back_markup, private_help_panel
 from config import BANNED_USERS, START_IMG_URL, SUPPORT_CHAT
 from strings import get_string, helpers
+
+
+# Telegram messages containing media (the private Help menu is a photo with a
+# caption) cannot be edited with edit_message_text(). Keep the original media
+# and edit its caption instead; text-only group/help messages use edit text.
+_CAPTION_MEDIA_FIELDS = (
+    "photo", "video", "animation", "document", "audio", "voice",
+)
+
+
+def _message_has_caption_media(message) -> bool:
+    return any(
+        getattr(message, field, None) is not None
+        for field in _CAPTION_MEDIA_FIELDS
+    )
+
+
+async def _edit_callback_message(update, text: str, reply_markup) -> None:
+    message = getattr(update, "message", None)
+    if message is not None and _message_has_caption_media(message):
+        await update.edit_message_caption(caption=text, reply_markup=reply_markup)
+    else:
+        await update.edit_message_text(text=text, reply_markup=reply_markup)
 
 
 @app.on_message(filters.command(["help"]) & filters.private & ~BANNED_USERS)
@@ -42,8 +65,8 @@ async def helper_private(
         language = await get_lang(chat_id)
         _ = get_string(language)
         keyboard = help_pannel(_, True)
-        await update.edit_message_text(
-            _["help_1"].format(SUPPORT_CHAT), reply_markup=keyboard
+        await _edit_callback_message(
+            update, _["help_1"].format(SUPPORT_CHAT), reply_markup=keyboard
         )
     else:
         try:
@@ -71,15 +94,25 @@ async def help_com_group(client, message: Message, _):
 @app.on_callback_query(filters.regex("help_callback") & ~BANNED_USERS)
 @languageCB
 async def helper_cb(client, CallbackQuery, _):
-    callback_data = CallbackQuery.data.strip()
-    cb = callback_data.split(None, 1)[1]
+    try:
+        await CallbackQuery.answer()
+    except Exception:
+        pass
+
+    callback_data = (CallbackQuery.data or "").strip()
+    parts = callback_data.split(None, 1)
+    if len(parts) != 2:
+        return
+    cb = parts[1]
     keyboard = help_back_markup(_)
-    if cb == "hb1":
-        await CallbackQuery.edit_message_text(helpers.HELP_1, reply_markup=keyboard)
-    elif cb == "hb2":
-        await CallbackQuery.edit_message_text(helpers.HELP_2, reply_markup=keyboard)
-    elif cb == "hb3":
-        await CallbackQuery.edit_message_text(helpers.HELP_3, reply_markup=keyboard)
+    page = {
+        "hb1": helpers.HELP_1,
+        "hb2": helpers.HELP_2,
+        "hb3": helpers.HELP_3,
+        "hb4": helpers.HELP_4,
+    }.get(cb)
+    if page is not None:
+        await _edit_callback_message(CallbackQuery, page, reply_markup=keyboard)
 
 
 @app.on_callback_query(filters.regex("close") & ~BANNED_USERS)

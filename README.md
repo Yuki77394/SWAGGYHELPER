@@ -15,7 +15,8 @@
 | Command        | Where it works | What it does                                                                                |
 | -------------- | -------------- | ------------------------------------------------------------------------------------------- |
 | `/setdelay NsNm Nh \| off` | Channels only | Auto-delete every new channel post after a delay (3 s .. 24 h). Delay is counted from the **original post time** and never changes on edit. |
-| `/setgap NsNm Nh \| off`   | Channels only | Enforce a minimum interval between **surviving** channel posts. Rejected posts never reset/extend the gap. Per-channel, not per-user. |
+| `/setgap NsNm Nh \| off`   | Channels only | Enforce a minimum interval between **accepted** channel posts that still exist. Rejected and edited posts never reset/extend the gap; if you manually delete the latest accepted post, the gap counts from the previous one. A **media album** (photos/videos sent together) is one post: allowed or deleted as a whole. Re-running `/setgap` with the **same** duration keeps the running timer; a new duration starts a fresh window. Per-channel, not per-user. |
+| `/setanonymous` | PM with the bot | Per-channel anonymous-post protection (ENABLE/DISABLE). When on, only posts whose personal account Telegram exposes are kept. Posts sent with a channel/chat identity or with unknown sender metadata are deleted (service messages are exempt). An author signature alone is not an identity, and the bot never claims to know which admin sent a channel-identity post. |
 | `/createpost`  | PM with the bot | Interactive Post Creator — Hidden Video Preview or Normal Post (Format 1 / Format 2) with manual text, video, photo, button styles, preview, cancel, back. |
 
 `/setdelay on` and `/setgap on` are intentionally **invalid** — the bot replies
@@ -23,7 +24,7 @@ with the help text.
 
 All user-facing commands:
 
-`/start`, `/help`, `/privacy`, `/setdelay`, `/setgap`, `/createpost`, `/cancel`
+`/start`, `/help`, `/privacy`, `/setdelay`, `/setgap`, `/setanonymous`, `/createpost`, `/cancel`
 
 (`/cancel` is part of the Create Post workflow.)
 
@@ -42,7 +43,48 @@ All user-facing commands:
   `time.time() + delay`. Editing at 12:00:40 of a 12:00:00 post still
   deletes at 12:01:00 for a `60s` delay.
 * **Atomic gap** — `find_one_and_update` with a precondition makes
-  simultaneous posters race safely; only one is allowed.
+  simultaneous posters race safely; only one is allowed. Decisions for
+  one channel are additionally serialised by a per-channel lock.
+* **Manual deletion** — every accepted post is remembered in
+  `gap_history` (newest 50, original Telegram timestamps). If an admin
+  deletes the latest accepted post, the gap is measured from the most
+  recent earlier accepted post that still exists. Example, gap 15m:
+  A 10:00, B 10:15, B deleted → a post at 10:17 is allowed. Only
+  accepted posts count: rejected, edited, bot, command and service
+  messages (pins, title changes …) never move the timer. Existence is
+  checked with `get_messages` (bots cannot read channel history); an API
+  error is never treated as a deletion.
+* **Re-running `/setgap`** — the same duration changes nothing (the
+  running timer and history are kept); only the first activation or a
+  real duration change starts a fresh window. Same for the private-chat
+  wizard.
+* **Media albums** — Telegram delivers each photo/video of an album as a
+  separate update (same `media_group_id`), in any order. The album is
+  judged once and every item follows that verdict: the whole album is
+  kept (one gap slot) or the whole album is deleted — never the first
+  item kept and the rest deleted. The verdict is stored atomically in
+  MongoDB (`gap_albums`), so concurrent items, a second process or a
+  restart mid-album reach the same outcome. `/setdelay` still deletes each
+  item at its own deadline, and an album counts for manual-deletion
+  recovery while any of its items is still in the channel.
+* **`/setdelay` + `/setgap`** — a post deleted by the bot's own
+  `/setdelay` job still counts for the gap, so auto-deletion never
+  shortens it. "Deleted by `/setdelay`" is decided only from what the
+  worker observed (Telegram's answer to its delete call), never from the
+  clock: a post that disappeared before the worker deleted it was
+  deleted manually, even if its deadline has passed. If a delete call's
+  outcome is unknown (network error) and the retry hits FloodWait, the
+  post keeps counting until Telegram's answer settles it.
+* **`/setanonymous` identity rules** — the sender is read from Telegram's
+  raw `from_id`: a personal account is allowed; the channel's own identity
+  or another channel's/chat's identity is rejected; unknown sender metadata
+  is rejected (service messages are exempt). The bot logs only the sender
+  chat Telegram reports and never names an admin.
+* **`/setanonymous` + `/setgap`** — the anonymous filter runs first
+  (handler group -30). A post it rejects is never judged or recorded by
+  the gap (group 0) — even if deleting it fails — and the verdict is
+  stored in MongoDB so the atomic accept refuses it too. Disabling
+  `/setgap` or `/setdelay` never removes the `/setanonymous` setting.
 * **Restart-safe** — settings + pending jobs persist across bot restarts.
   The background worker resumes on boot.
 
@@ -127,7 +169,7 @@ SWAGGYHELPER/
 │       └── misc/{autodelete,createpost}.py
 ├── strings/
 │   ├── __init__.py
-│   ├── helpers.py            # HELP_1, HELP_2, HELP_3 only
+│   ├── helpers.py            # HELP_1..HELP_4 (Help menu pages, 2x2 buttons)
 │   └── langs/en.yml         # rewritten — no music strings
 ├── config.py
 ├── requirements.txt

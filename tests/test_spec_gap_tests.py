@@ -170,13 +170,19 @@ class TestSpec06NewCycle:
 
 
 # ---------------------------------------------------------------------------
-# TEST 7 — Manual deletion before the gap: DELETE
+# TEST 7 — Manual deletion before the gap: ALLOW (nothing left to measure from)
 # ---------------------------------------------------------------------------
 
 class TestSpec07ManualDeletionBeforeGap:
-    async def test_07_manual_deletion_before_gap_deleted(self):
+    async def test_07_manual_deletion_before_gap_allows_next_post(self):
         """Post at 12:00 allowed. Message manually deleted at 12:05.
-        New post at 12:10. Expected: DELETE (only 10 min elapsed).
+        New post at 12:10. The gap is measured from the most recent earlier
+        SURVIVING accepted post; there is none, so the deleted post no longer
+        blocks the channel. Expected: ALLOW.
+
+        (Superseded expectation: DELETE — the deleted post's timer kept
+        running. That contradicted the manual-deletion rule and was already
+        failing against the previous code.)
         """
         from SWAGGYMUSIC.plugins.misc.autodelete import _gap_allows_post, _resolve_stale_gap_reference
         from SWAGGYMUSIC import app
@@ -184,27 +190,22 @@ class TestSpec07ManualDeletionBeforeGap:
         await _enable_gap(-200007)
         assert await _gap_allows_post(-200007, T_12_00, GAP, 1) is True
 
-        # Simulate manual deletion: _message_exists returns False.
+        # Simulate manual deletion: Telegram returns an empty message.
         deleted_msg = MagicMock()
         deleted_msg.empty = True
         deleted_msg.date = None
         app.get_messages = AsyncMock(return_value=deleted_msg)
 
-        async def _empty_history(*a, **kw):
-            if False:
-                yield
-        app.get_chat_history = _empty_history
-
-        # New post at 12:10 (600 sec). Gap is 900 sec. Should be rejected.
+        # New post at 12:10 (600 sec), inside the deleted post's old window.
         new_msg = MagicMock()
         new_msg.id = 10
         new_msg.chat = MagicMock()
         new_msg.chat.id = -200007
         await _resolve_stale_gap_reference(-200007, new_msg, GAP, T_12_00 + 600)
         accepted = await _gap_allows_post(-200007, T_12_00 + 600, GAP, 10)
-        assert accepted is False, "Post at 12:10 (10 min after 12:00) must be DELETED"
-        # Timestamp must still be 12:00
-        assert await _get_last_gap_ts(-200007) == T_12_00
+        assert accepted is True, "The only accepted post was deleted manually: 12:10 must be ALLOWED"
+        # The new post is now the reference.
+        assert await _get_last_gap_ts(-200007) == T_12_00 + 600
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +251,11 @@ class TestSpec08ManualDeletionAfterGap:
 # ---------------------------------------------------------------------------
 
 class TestSpec09NoSurvivingMessage:
-    async def test_09_no_surviving_message_timer_not_reset(self):
-        """Stored message ID gone, no historical message available.
-        Persisted timestamp within gap window. Expected: apply timing rule;
-        do NOT reset timer just because message is missing.
+    async def test_09_unverifiable_reference_does_not_reset_timer(self):
+        """Telegram cannot tell whether the stored message still exists (API
+        error). Persisted timestamp within gap window. Expected: apply the
+        timing rule; do NOT reset the timer just because the message could
+        not be verified — an API error is never proof of deletion.
         """
         from SWAGGYMUSIC.plugins.misc.autodelete import _gap_allows_post, _resolve_stale_gap_reference
         from SWAGGYMUSIC import app
@@ -262,16 +264,8 @@ class TestSpec09NoSurvivingMessage:
         # Accepted at 12:00
         assert await _gap_allows_post(-200009, T_12_00, GAP, 1) is True
 
-        # Simulate: message gone, no surviving posts
-        deleted_msg = MagicMock()
-        deleted_msg.empty = True
-        deleted_msg.date = None
-        app.get_messages = AsyncMock(return_value=deleted_msg)
-
-        async def _empty_history(*a, **kw):
-            if False:
-                yield
-        app.get_chat_history = _empty_history
+        # Simulate: Telegram/network failure while checking the reference.
+        app.get_messages = AsyncMock(side_effect=RuntimeError("network down"))
 
         # New post at 12:05 (300 sec) — inside the gap.
         new_msg = MagicMock()
@@ -280,9 +274,31 @@ class TestSpec09NoSurvivingMessage:
         new_msg.chat.id = -200009
         await _resolve_stale_gap_reference(-200009, new_msg, GAP, T_12_00 + 300)
         accepted = await _gap_allows_post(-200009, T_12_00 + 300, GAP, 5)
-        assert accepted is False, "Post inside gap must be rejected even if ref is gone"
+        assert accepted is False, "Post inside gap must be rejected while the ref is unverifiable"
         # Timestamp must NOT have been reset
         assert await _get_last_gap_ts(-200009) == T_12_00, "Timer must not reset"
+
+    async def test_09b_confirmed_deletion_without_surviving_post_releases_timer(self):
+        """Stored message confirmed deleted (manually) and no earlier accepted
+        post survives: the timer is released and the post is ALLOWED."""
+        from SWAGGYMUSIC.plugins.misc.autodelete import _gap_allows_post, _resolve_stale_gap_reference
+        from SWAGGYMUSIC import app
+
+        await _enable_gap(-200024)
+        assert await _gap_allows_post(-200024, T_12_00, GAP, 1) is True
+
+        deleted_msg = MagicMock()
+        deleted_msg.empty = True
+        deleted_msg.date = None
+        app.get_messages = AsyncMock(return_value=deleted_msg)
+
+        new_msg = MagicMock()
+        new_msg.id = 5
+        new_msg.chat = MagicMock()
+        new_msg.chat.id = -200024
+        await _resolve_stale_gap_reference(-200024, new_msg, GAP, T_12_00 + 300)
+        assert await _gap_allows_post(-200024, T_12_00 + 300, GAP, 5) is True
+        assert await _get_last_gap_ts(-200024) == T_12_00 + 300
 
 
 # ---------------------------------------------------------------------------

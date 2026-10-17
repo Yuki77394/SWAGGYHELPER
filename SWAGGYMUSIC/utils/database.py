@@ -28,8 +28,26 @@ sudo system, banned-user filter, and the autodelete/setgap collections.
     gap:                  <int seconds>,  # present only when /setgap enabled
     gap_enabled:          <bool>,         # present only when /setgap enabled
     last_gap_post_at:     <int unix ts>,  # present after first allowed gap post
-    last_gap_post_msg_id: <int msg_id>    # present after first allowed gap post
-  }
+    last_gap_post_msg_id: <int msg_id>,   # present after first allowed gap post
+    gap_history: [                        # newest 50 ACCEPTED gap posts
+      { msg_id: <int>, post_at: <int unix ts>,   # original Telegram time
+        media_group_id: <int>,                   # album items only
+        bot_delete: "pending"|"confirmed",       # written ONLY by the
+        bot_deleted_at: <int unix ts> }          #   /setdelay worker
+    ],                                    # (manual-deletion fallback; reset
+                                          #  only on first activation or a
+                                          #  duration change, removed on
+                                          #  disable — see set_gap_duration)
+    gap_albums: [                         # newest 100 media-album verdicts
+      { media_group_id: <int>,            # (one /setgap decision per album;
+        verdict: "accepted"|"rejected",   #  kept across /setgap changes so
+        post_at: <int unix ts>,           #  an album is never split)
+        msg_id: <int> }
+    ],
+    anonymous_filter_enabled: <bool>,     # /setanonymous
+    anon_rejected_msg_ids: [<int>, ...]   # newest 200 posts rejected by the
+  }                                       # anonymous filter (never accepted
+                                          # as /setgap references)
 
   autodelete_jobs  — one document per pending deletion
   ------------------------------------------------------------
@@ -48,7 +66,11 @@ sudo system, banned-user filter, and the autodelete/setgap collections.
                                                 #  BSON Date values).
     attempts:             <int>,                # retry counter (FloodWait does
                                                 #  NOT increment this)
-    original_post_time:   <int unix ts>         # immutable after $setOnInsert
+    original_post_time:   <int unix ts>,        # immutable after $setOnInsert
+    reason:               "GAP_REJECT_RETRY"    # only on retry jobs for
+                          | "ANON_REJECT_RETRY",#  rejected posts (FloodWait)
+    inflight:             <bool>                # a delete call was sent and
+                                                #  its outcome is unknown
   }
 
   Required indexes
@@ -95,9 +117,9 @@ sudo system, banned-user filter, and the autodelete/setgap collections.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Tuple, Union
 
-from pymongo import ASCENDING
+from pymongo import ASCENDING, ReturnDocument
 from pymongo.errors import (
     CollectionInvalid,
     DuplicateKeyError,
@@ -472,6 +494,133 @@ async def migrate_jobs_ttl_field(*, batch_size: int = 500) -> int:
             total_updated,
         )
     return total_updated
+
+
+# ---------------------------------------------------------------------------
+# Shared channel-setting writes (/setgap, /setdelay, /setanonymous)
+# ---------------------------------------------------------------------------
+
+# Gap-window state: the reference post and the accepted-post history.
+# (``gap_albums`` is deliberately NOT part of it: an album that is being
+# delivered while /setgap changes keeps its verdict for all of its items.)
+GAP_WINDOW_FIELDS = ("last_gap_post_at", "last_gap_post_msg_id", "gap_history")
+
+
+async def set_gap_duration(chat_id: int, seconds: int) -> Tuple[str, int]:
+    """Enable /setgap or change its duration, atomically.
+
+    Used by the channel command and the private-chat wizard. Returns
+    ``(status, previous_seconds)``:
+
+    * ``"NO_CHANGE"`` — /setgap is already enabled with this duration.
+      Nothing is written: the running timer (reference post) and the
+      accepted-post history are preserved.
+    * ``"ENABLED"`` — first activation (or re-activation after disable):
+      a fresh gap window starts.
+    * ``"UPDATED"`` — the duration changed: a fresh gap window starts, so
+      posts accepted under the old duration do not block the new one.
+
+    The reset is one compare-and-set that only matches a document whose gap
+    is NOT already ``seconds``. Two identical commands racing each other,
+    or a re-run racing a new post, can therefore never reset the window
+    twice or wipe a post accepted in between.
+    """
+    seconds = int(seconds)
+    for _attempt in range(3):
+        if await settings_db.find_one(
+            {"chat_id": chat_id, "gap_enabled": True, "gap": seconds}, {"_id": 1},
+        ):
+            return "NO_CHANGE", seconds
+
+        prior = await settings_db.find_one_and_update(
+            {
+                "chat_id": chat_id,
+                "$or": [{"gap_enabled": {"$ne": True}}, {"gap": {"$ne": seconds}}],
+            },
+            {
+                "$set": {"chat_id": chat_id, "gap": seconds, "gap_enabled": True},
+                "$unset": {field: "" for field in GAP_WINDOW_FIELDS},
+            },
+            return_document=ReturnDocument.BEFORE,
+        )
+        if prior is not None:
+            if prior.get("gap_enabled"):
+                try:
+                    return "UPDATED", int(prior.get("gap") or 0)
+                except (TypeError, ValueError):
+                    return "UPDATED", 0
+            return "ENABLED", 0
+
+        # No document yet (or it was set to this duration concurrently).
+        result = await settings_db.update_one(
+            {"chat_id": chat_id},
+            {"$setOnInsert": {"chat_id": chat_id, "gap": seconds, "gap_enabled": True}},
+            upsert=True,
+        )
+        if result.upserted_id is not None:
+            return "ENABLED", 0
+    return "NO_CHANGE", seconds
+
+
+async def delete_settings_if_unused(chat_id: int) -> bool:
+    """Delete a channel's settings document only if NO feature uses it.
+
+    /setgap, /setdelay and /setanonymous all live in this document, so it
+    may only go when all three are off. Done as one conditional delete so
+    a feature enabled concurrently is never wiped.
+    """
+    result = await settings_db.delete_one({
+        "chat_id": chat_id,
+        "gap_enabled": {"$ne": True},
+        "gap": {"$exists": False},
+        "enabled": {"$ne": True},
+        "delay": {"$exists": False},
+        "anonymous_filter_enabled": {"$ne": True},
+    })
+    return bool(result.deleted_count)
+
+
+def deletion_job_document(
+    chat_id: int, message_id: int, *, delete_at: int,
+    original_post_time: int, reason: Optional[str] = None,
+) -> dict:
+    """The autodelete_jobs document for one pending deletion.
+
+    ``reason`` is stored only for retry jobs that are not /setdelay
+    deletions (``GAP_REJECT_RETRY``, ``ANON_REJECT_RETRY``).
+    """
+    delete_at = int(delete_at)
+    job = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "delete_at": delete_at,
+        # TTL safety net: BSON Date, 7 days after the deadline.
+        "expires_at": _ttl_date_from_unix(delete_at + 7 * 24 * 60 * 60),
+        "attempts": 0,
+        "original_post_time": int(original_post_time),
+    }
+    if reason:
+        job["reason"] = reason
+    return job
+
+
+async def queue_deletion_job(
+    chat_id: int, message_id: int, *, delete_at: int,
+    original_post_time: int, reason: Optional[str] = None,
+) -> None:
+    """Insert a job for the persistent deletion worker (never overwrites).
+
+    ``$setOnInsert`` + the unique (chat_id, message_id) index mean an
+    existing job — and its ``delete_at`` — is never changed.
+    """
+    await jobs_db.update_one(
+        {"chat_id": chat_id, "message_id": message_id},
+        {"$setOnInsert": deletion_job_document(
+            chat_id, message_id, delete_at=delete_at,
+            original_post_time=original_post_time, reason=reason,
+        )},
+        upsert=True,
+    )
 
 
 # ---------------------------------------------------------------------------

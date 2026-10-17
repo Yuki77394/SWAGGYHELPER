@@ -37,7 +37,10 @@ _STUB_CONFIG.SUPPORT_CHAT = "https://t.me/stub_support"
 _STUB_CONFIG.SUPPORT_CHANNEL = "https://t.me/stub_channel"
 _STUB_CONFIG.HEROKU_API_KEY = ""
 _STUB_CONFIG.HEROKU_APP_NAME = ""
-_STUB_CONFIG.BANNED_USERS = set()
+# Same type as the real config (a Kurigram user filter): the Start/Help
+# plugins use ``~BANNED_USERS`` in their handler filters.
+from pyrogram import filters as _pyro_filters  # noqa: E402
+_STUB_CONFIG.BANNED_USERS = _pyro_filters.user()
 _STUB_CONFIG.START_IMG_URL = "https://example.com/stub.jpg"
 _STUB_CONFIG.PING_IMG_URL = "https://example.com/stub.jpg"
 _STUB_CONFIG.PRIVACY_LINK = "https://example.com/privacy"
@@ -101,17 +104,42 @@ import SWAGGYMUSIC  # noqa: E402  -- triggers app = Alone()
 from SWAGGYMUSIC import app  # noqa: E402
 
 # Replace app's network methods with AsyncMock so no real Telegram calls happen.
-app.get_chat = AsyncMock()
-app.get_chat_member = AsyncMock()
-app.get_messages = AsyncMock()
-app.get_users = AsyncMock()
-app.delete_messages = AsyncMock()
-app.send_message = AsyncMock()
-app.send_photo = AsyncMock()
-app.reply_text = AsyncMock()
-app.resolve_peer = AsyncMock(return_value=MagicMock())
-app.invoke = AsyncMock()
-app.get_chat_history = MagicMock()  # returns an async iterator; tests set side_effect
+def _existing_message(message_id):
+    """A Message-like mock for a message that still exists in the chat."""
+    msg = MagicMock()
+    msg.id = message_id
+    msg.empty = None
+    msg.date = datetime.now(timezone.utc)
+    return msg
+
+
+async def _default_get_messages(chat_id=None, message_ids=None, *args, **kwargs):
+    """Default get_messages: every requested message still exists.
+
+    (A bare AsyncMock returned a MagicMock whose truthy ``.empty`` made every
+    message look DELETED.) Tests that need a deleted message override
+    ``app.get_messages`` themselves.
+    """
+    if message_ids is None or isinstance(message_ids, int):
+        return _existing_message(message_ids)
+    return [_existing_message(mid) for mid in message_ids]
+
+
+def _install_default_app_mocks():
+    app.get_chat = AsyncMock()
+    app.get_chat_member = AsyncMock()
+    app.get_messages = AsyncMock(side_effect=_default_get_messages)
+    app.get_users = AsyncMock()
+    app.delete_messages = AsyncMock()
+    app.send_message = AsyncMock()
+    app.send_photo = AsyncMock()
+    app.reply_text = AsyncMock()
+    app.resolve_peer = AsyncMock(return_value=MagicMock())
+    app.invoke = AsyncMock()
+    app.get_chat_history = MagicMock()  # returns an async iterator; tests set side_effect
+
+
+_install_default_app_mocks()
 
 # `app.id` and `app.username` are used by handlers.
 app.id = 9999999
@@ -183,10 +211,64 @@ SUDOERS.add2 = lambda u: SUDOERS.add(u)  # helper for tests
 
 import pytest  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _fresh_app_mocks():
+    """Give every test fresh default Telegram API mocks.
+
+    Many tests assign ``app.<method> = AsyncMock(...)`` directly and never
+    restore it, so one test's "message deleted" / FloodWait mock leaked
+    into later tests and made results depend on test order.
+    """
+    _install_default_app_mocks()
+    yield
+    _install_default_app_mocks()
+
+
 @pytest.fixture
 def mock_db():
     """Yield the in-memory MongoDB handle."""
     return _mock_mongodb
+
+
+# Unique channel ids for FakeBotChannel-based tests (shared by all files).
+# Real channel-format ids (-100…): gap_harness.tg_post derives the raw
+# channel id from them to build genuine MTProto updates.
+import itertools  # noqa: E402
+
+_FAKE_CHANNEL_IDS = itertools.count(-1000000300101, -1)
+
+
+@pytest.fixture
+def channel(monkeypatch):
+    """A FakeBotChannel (see tests/gap_harness.py) wired into ``app``."""
+    from gap_harness import FakeBotChannel
+    from pyrogram.enums import ChatMemberStatus
+
+    fake = FakeBotChannel(next(_FAKE_CHANNEL_IDS))
+    monkeypatch.setattr(app, "get_messages", fake.get_messages)
+    monkeypatch.setattr(app, "delete_messages", fake.delete_messages)
+    monkeypatch.setattr(app, "get_chat_history", fake.get_chat_history)
+    admin = MagicMock()
+    admin.status = ChatMemberStatus.ADMINISTRATOR
+    admin.privileges = MagicMock()
+    admin.privileges.can_delete_messages = True
+    monkeypatch.setattr(app, "get_chat_member", AsyncMock(return_value=admin))
+    return fake
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Pin the gap engine's wall clock (``autodelete._now``)."""
+    import SWAGGYMUSIC.plugins.misc.autodelete as ad
+    from gap_harness import at, ts
+
+    state = {"now": ts(at(0))}
+
+    def set_now(when) -> None:
+        state["now"] = ts(when)
+
+    monkeypatch.setattr(ad, "_now", lambda: state["now"])
+    return set_now
 
 
 # NOTE: An autouse cleanup fixture that calls delete_many({}) on mongomock

@@ -62,7 +62,8 @@ from SWAGGYMUSIC.utils.activity_logger import (_format_channel_id,
                                                _format_duration,
                                                log_setdelay_change,
                                                log_setgap_change)
-from SWAGGYMUSIC.utils.database import settings_db
+from SWAGGYMUSIC.utils.database import (delete_settings_if_unused,
+                                        set_gap_duration, settings_db)
 from SWAGGYMUSIC.utils.permissions import verify_channel_admin
 
 log = LOGGER(__name__)
@@ -611,42 +612,23 @@ async def setconfig_input(_, message: Message):
 async def _do_enable(feature: str, channel_id: int, seconds: int) -> str:
     """Enable or update SETGAP/SETDELAY for a channel.
 
-    Returns "ENABLED", "UPDATED", or None on failure.
+    Returns "ENABLED", "UPDATED", "NO_CHANGE", or None on failure.
     Reuses the existing mongodb.autodelete_settings collection and schema.
     """
     try:
-        prior = await settings_db.find_one({"chat_id": channel_id})
         if feature == "setgap":
-            was_enabled = bool(prior and prior.get("gap_enabled"))
-            old_val = int(prior.get("gap") or 0) if was_enabled else 0
-
-            await settings_db.update_one(
-                {"chat_id": channel_id},
-                {
-                    "$set": {
-                        "chat_id": channel_id,
-                        "gap": seconds,
-                        "gap_enabled": True,
-                    },
-                    "$unset": {
-                        "last_gap_post_at": "",
-                        "last_gap_post_msg_id": "",
-                    },
-                },
-                upsert=True,
-            )
-
-            if not was_enabled:
-                return "ENABLED"
-            elif old_val != seconds:
+            # Same atomic helper as the channel command: the SAME duration
+            # keeps the running timer and accepted-post history; only a
+            # first activation or a real duration change starts a fresh
+            # gap window.
+            status, old_val = await set_gap_duration(channel_id, seconds)
+            if status == "UPDATED":
                 # Store old value for the caller to use in the log
-                _tmp = _format_duration(old_val)
-                _set_old_value(channel_id, feature, _tmp)
-                return "UPDATED"
-            else:
-                return "NO_CHANGE"  # Same value — no state change
+                _set_old_value(channel_id, feature, _format_duration(old_val))
+            return status
 
         else:  # setdelay
+            prior = await settings_db.find_one({"chat_id": channel_id})
             was_enabled = bool(prior and prior.get("enabled"))
             old_val = int(prior.get("delay") or 0) if was_enabled else 0
 
@@ -692,6 +674,10 @@ async def _do_disable(feature: str, channel_id: int) -> bool:
 
     This is the ONLY code path that can disable these features.
     Channel-side /setgap off and /setdelay off are silently ignored.
+
+    The per-channel settings document also holds the /setanonymous
+    setting, so it is removed only when /setgap, /setdelay AND
+    /setanonymous are all off (database.delete_settings_if_unused).
     """
     try:
         if feature == "setgap":
@@ -700,19 +686,15 @@ async def _do_disable(feature: str, channel_id: int) -> bool:
                 {"$unset": {
                     "gap_enabled": "", "gap": "",
                     "last_gap_post_at": "", "last_gap_post_msg_id": "",
+                    "gap_history": "",
                 }},
             )
-            remaining = await settings_db.find_one({"chat_id": channel_id})
-            if remaining and not remaining.get("enabled") and "delay" not in remaining:
-                await settings_db.delete_one({"chat_id": channel_id})
         else:  # setdelay
             await settings_db.update_one(
                 {"chat_id": channel_id},
                 {"$unset": {"enabled": "", "delay": ""}},
             )
-            remaining = await settings_db.find_one({"chat_id": channel_id})
-            if remaining and not remaining.get("gap_enabled") and "gap" not in remaining:
-                await settings_db.delete_one({"chat_id": channel_id})
+        await delete_settings_if_unused(channel_id)
         return True
     except Exception as exc:
         log.warning("_do_disable failed: %s: %s", type(exc).__name__, exc)
