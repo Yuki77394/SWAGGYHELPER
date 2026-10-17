@@ -342,19 +342,16 @@ async def _get_latest_existing_post_before(
 ):
     """Find the latest EXISTING channel post before ``current_msg_id``.
 
-    Walks backwards through the channel history starting from
-    ``current_msg_id`` (using Pyrogram's ``message_id`` parameter on
-    ``get_chat_history``), skips deleted/empty messages, and returns
+    Walks backwards through channel history before ``current_msg_id``
+    using Pyrogram's ``offset_id`` parameter, skips deleted/empty messages, and returns
     the first surviving post whose ``id < current_msg_id`` and
     ``id >= min_msg_id``.
 
-    ``min_msg_id`` lets the caller constrain the search to the gap
-    window (so we don't accidentally adopt an arbitrarily OLD channel
-    post as the new gap reference).
+    ``min_msg_id`` optionally constrains the oldest message considered.
+    The caller can intentionally use 1 to find the latest surviving post,
+    even if it is older than the configured gap window.
 
-    ``limit`` caps the number of messages walked (Telegram API limits
-    + bounded work). 25 is a generous cap — under normal operation the
-    relevant surviving post is within the most recent few messages.
+    ``limit`` caps the number of messages walked to bound API work.
 
     Returns the ``Message`` object, or ``None`` if no surviving post
     is found within the requested range, or on any error.
@@ -367,6 +364,7 @@ async def _get_latest_existing_post_before(
             chat_id,
             limit=limit,
             offset=0,
+            offset_id=int(current_msg_id),
         ):
             mid = getattr(msg, "id", None)
             if mid is None:
@@ -387,60 +385,28 @@ async def _get_latest_existing_post_before(
             "get_latest_existing_post failed for %s (before msg %s, min %s): %s: %s",
             chat_id, current_msg_id, min_msg_id, type(exc).__name__, exc,
         )
-        return None
+        # Distinguish an API failure from a genuine empty history. The caller
+        # must not clear a valid timestamp just because Telegram was unreachable.
+        raise
 
 
 async def _resolve_stale_gap_reference(
     chat_id: int, current_message: Message, gap: int, current_post_time: int,
 ) -> None:
-    """Detect and fix a stale gap reference caused by manual deletion.
+    """Repair the gap reference if its accepted post was manually deleted.
 
-    Called BEFORE ``_gap_allows_post()`` so the atomic gap check uses
-    the correct reference.  Steps:
+    Desired behaviour:
+    - If the stored reference message still exists, keep it.
+    - If it was deleted, use the latest earlier message that still exists
+      in the channel, regardless of whether that message is inside the gap
+      window. The next gap decision then naturally allows/rejects the new
+      post based on that surviving message's original timestamp.
+    - If no earlier surviving message exists, clear the stale reference so
+      the next incoming post is not blocked by a phantom timestamp.
 
-    1. Read the current settings document.
-    2. If ``last_gap_post_msg_id`` exists, check if that message still
-       exists in Telegram via ``_message_exists()``.
-    3. If the message still exists → no correction needed, return.
-    4. If the message was manually deleted (or deleted by /setdelay):
-       a. KEEP the stored ``last_gap_post_at`` timestamp. The timestamp
-          was set atomically by ``_gap_allows_post`` when the original
-          post was accepted — it is a verified, persisted fact and
-          remains valid even after the message itself is gone. This is
-          the critical fix for Issues 1 & 2: previously, clearing the
-          reference here caused the next ``_gap_allows_post`` to see
-          ``last_gap_post_at`` missing and accept the post
-          unconditionally, collapsing the gap window.
-       b. Best-effort: look for a SURVIVING post WITHIN the gap window
-          (``post_time >= current_post_time - gap`` and
-          ``id < current_message.id``). If found, ADOPT it as the new
-          reference — but ONLY if its timestamp is more recent than the
-          stored one (so we never extend the gap window beyond what the
-          stored timestamp + gap already implies; we only refresh the
-          message_id pointer so future existence checks work).
-       c. If no surviving post within the gap window is found, KEEP the
-          stored timestamp (do NOT clear it). The next
-          ``_gap_allows_post`` will use the stored timestamp to decide.
-
-    The update uses a precondition (``last_gap_post_msg_id`` must match
-    the stored value) to avoid race conditions — if another concurrent
-    post already updated the reference, this update is a no-op.  The
-    final gap decision is still made atomically by ``_gap_allows_post()``.
-
-    Conservative behaviour per spec Issue 4:
-    - "Do not blindly rely on a stale reference": we don't — we verify
-      via ``_message_exists`` and refresh the pointer when possible.
-    - "Do not restart the full gap timer unnecessarily": we don't —
-      the stored timestamp is preserved, so the gap window is NOT reset.
-    - "If no relevant surviving post exists, allow the new post": this
-      applies when there is NO stored timestamp at all. In that case
-      ``_gap_allows_post``'s ``$exists: False`` branch handles it. When
-      a stored timestamp DOES exist, it is used as the basis for the
-      gap decision (it is verified, persisted metadata, not a stale
-      message pointer).
-
-    This function NEVER raises — all exceptions are caught and logged
-    at WARNING level.
+    Updates use a compare-and-set on last_gap_post_msg_id to avoid replacing
+    a reference another concurrent post has already updated. This function
+    never raises; the normal atomic gap check still runs afterward.
     """
     try:
         setting = await settings_db.find_one({"chat_id": chat_id})
@@ -449,100 +415,56 @@ async def _resolve_stale_gap_reference(
 
         stored_msg_id = setting.get("last_gap_post_msg_id")
         if not stored_msg_id:
-            # No stored message_id — old document from before this fix,
-            # OR the gap was just enabled. Can't check existence. Fall
-            # through to the normal gap check (which handles the
-            # missing-reference case by accepting the post).
+            # Older settings documents may have a timestamp without a message ID.
+            # Leave them alone rather than assuming the message was deleted.
+            return
+
+        if await _message_exists(chat_id, int(stored_msg_id)):
             return
 
         stored_ts = setting.get("last_gap_post_at")
-
-        # STEP 1: Check if the stored reference message still exists.
-        if await _message_exists(chat_id, int(stored_msg_id)):
-            # Reference is valid — no correction needed.
-            return
-
-        # STEP 2: Reference message is GONE (manual deletion or /setdelay).
-        # The stored timestamp is STILL VALID — it was set atomically when
-        # the original post was accepted. We MUST NOT clear it; doing so
-        # would collapse the gap window (Issue 1 & Issue 2 root cause).
-        #
-        # Best-effort: try to find a SURVIVING post within the gap window
-        # so we can refresh the message_id pointer. If we find one whose
-        # timestamp is more recent than the stored timestamp, adopt it.
-        # This never EXTENDS the gap window — it only refreshes the pointer.
-        cutoff = current_post_time - gap
         latest_existing = await _get_latest_existing_post_before(
             chat_id,
             current_message.id,
-            min_msg_id=1,  # don't constrain by msg_id floor; we filter by time below
-            limit=25,
+            min_msg_id=1,
+            limit=100,
         )
 
+        selector = {
+            "chat_id": chat_id,
+            "last_gap_post_msg_id": stored_msg_id,
+        }
         if latest_existing is not None:
             new_timestamp = _post_unix_time(latest_existing)
-            new_msg_id = latest_existing.id
-
-            # Only adopt the surviving post if its timestamp is within
-            # the gap window AND more recent than the stored timestamp.
-            # This ensures we never:
-            #   - adopt an arbitrarily OLD post (which would make the
-            #     gap check pass incorrectly — Issue 2 root cause)
-            #   - extend the gap window beyond stored_ts + gap
-            if new_timestamp < cutoff:
-                # Surviving post is OLDER than the gap window — not
-                # relevant. Keep the stored timestamp (which is more
-                # recent and still valid).
-                log.info(
-                    "stale_gap_ref chat=%s stored_msg=%s stored_ts=%s: "
-                    "surviving post %s is older than cutoff %s, keeping stored ts",
-                    chat_id, stored_msg_id, stored_ts, new_msg_id, cutoff,
-                )
-                return
-
-            if stored_ts is not None and new_timestamp <= int(stored_ts):
-                # Surviving post is older than (or equal to) the stored
-                # reference. Keep the stored reference — it's more recent.
-                log.info(
-                    "stale_gap_ref chat=%s stored_msg=%s stored_ts=%s: "
-                    "surviving post %s ts=%s not more recent, keeping stored ts",
-                    chat_id, stored_msg_id, stored_ts, new_msg_id, new_timestamp,
-                )
-                return
-
-            # Adopt the surviving post as the new reference.
-            # Precondition: only if last_gap_post_msg_id hasn't changed
-            # (avoid race with another concurrent post).
+            new_msg_id = int(latest_existing.id)
             result = await settings_db.update_one(
-                {
-                    "chat_id": chat_id,
-                    "last_gap_post_msg_id": stored_msg_id,
-                },
-                {
-                    "$set": {
-                        "last_gap_post_at": new_timestamp,
-                        "last_gap_post_msg_id": new_msg_id,
-                    },
-                },
+                selector,
+                {"$set": {
+                    "last_gap_post_at": new_timestamp,
+                    "last_gap_post_msg_id": new_msg_id,
+                }},
             )
             log.info(
-                "stale_gap_ref chat=%s refreshed: msg %s (ts %s) → msg %s (ts %s), matched=%s",
+                "stale_gap_ref chat=%s deleted_ref=%s ts=%s; switched to surviving msg=%s ts=%s matched=%s",
                 chat_id, stored_msg_id, stored_ts, new_msg_id, new_timestamp,
                 getattr(result, "matched_count", "?"),
             )
         else:
-            # No surviving post within the gap window. KEEP the stored
-            # timestamp — it's all we have, and it's verified. The next
-            # _gap_allows_post will use it to decide. DO NOT CLEAR.
+            # No surviving earlier post: remove both stale reference fields.
+            # _gap_allows_post will then allow the incoming post as the new anchor.
+            result = await settings_db.update_one(
+                selector,
+                {"$unset": {
+                    "last_gap_post_at": "",
+                    "last_gap_post_msg_id": "",
+                }},
+            )
             log.info(
-                "stale_gap_ref chat=%s stored_msg=%s stored_ts=%s: "
-                "no surviving post in gap window, keeping stored ts (NOT clearing)",
+                "stale_gap_ref chat=%s deleted_ref=%s ts=%s; no surviving prior post, cleared stale reference matched=%s",
                 chat_id, stored_msg_id, stored_ts,
+                getattr(result, "matched_count", "?"),
             )
     except Exception as exc:
-        # NEVER raise — the gap check still runs and will use whatever
-        # state is in the database. Log at WARNING so the operator can
-        # see the failure.
         log.warning(
             "Stale gap reference resolution failed for %s: %s: %s",
             chat_id, type(exc).__name__, exc,
