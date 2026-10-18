@@ -12,6 +12,7 @@ import importlib.util
 import re
 import sys
 import types as pytypes
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -54,8 +55,10 @@ def _query(data: str, *, with_photo: bool = False):
     user = types.User(id=USER, first_name="User", client=app)
     kwargs = {}
     if with_photo:
+        # Kurigram 2.2.25's Photo also requires file_size and date.
         kwargs["photo"] = types.Photo(
-            file_id="photo-file-id", file_unique_id="photo-unique-id", width=1, height=1
+            file_id="photo-file-id", file_unique_id="photo-unique-id", width=1, height=1,
+            file_size=1, date=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
     message = types.Message(id=55, chat=chat, from_user=None, client=app, **kwargs)
     return types.CallbackQuery(client=app, id="q1", from_user=user, chat_instance="ci",
@@ -161,30 +164,49 @@ class TestCallbacks:
         assert [[b.callback_data for b in row] for row in kwargs["reply_markup"].inline_keyboard] \
             == [["settings_back_helper"]]
 
+    @staticmethod
+    def _spy_caption_edits(monkeypatch):
+        """Record CallbackQuery.edit_message_caption calls (and run them)."""
+        captions = []
+        original = types.CallbackQuery.edit_message_caption
+
+        async def spy(self, caption, *args, **kwargs):
+            captions.append(caption)
+            return await original(self, caption, *args, **kwargs)
+
+        monkeypatch.setattr(types.CallbackQuery, "edit_message_caption", spy)
+        return captions
+
     @pytest.mark.parametrize("cb, page", [
         ("hb1", "HELP_1"), ("hb2", "HELP_2"), ("hb3", "HELP_3"), ("hb4", "HELP_4"),
     ])
-    async def test_category_callback_edits_photo_caption_not_text(self, telegram, cb, page):
+    async def test_category_callback_edits_photo_caption_not_text(self, telegram, monkeypatch, cb, page):
         from strings import helpers
 
         _help_plugins()
+        captions = self._spy_caption_edits(monkeypatch)
         await dispatch_callback(_query(f"help_callback {cb}", with_photo=True))
-        kwargs = telegram["edit_message_caption"].await_args.kwargs
-        assert kwargs["caption"] == getattr(helpers, page)
+        assert captions == [getattr(helpers, page)], "a photo message takes the caption path"
+        # Kurigram 2.2.25 implements CallbackQuery.edit_message_caption() as
+        # edit_message_text(caption): ONE messages.editMessage request that
+        # replaces the photo's caption and keeps the photo.
+        kwargs = telegram["edit_message_text"].await_args.kwargs
+        assert kwargs["text"] == getattr(helpers, page)
         assert kwargs["chat_id"] == USER and kwargs["message_id"] == 55
-        telegram["edit_message_text"].assert_not_awaited()
+        telegram["edit_message_media"].assert_not_awaited()
 
-    async def test_back_to_help_menu_edits_photo_caption(self, telegram):
+    async def test_back_to_help_menu_edits_photo_caption(self, telegram, monkeypatch):
         from strings import get_string
 
         _help_plugins()
+        captions = self._spy_caption_edits(monkeypatch)
         await dispatch_callback(_query("settings_back_helper", with_photo=True))
-        kwargs = telegram["edit_message_caption"].await_args.kwargs
-        assert kwargs["caption"] == get_string("en")["help_1"].format(
-            __import__("config").SUPPORT_CHAT
-        )
+        expected = get_string("en")["help_1"].format(__import__("config").SUPPORT_CHAT)
+        assert captions == [expected]
+        kwargs = telegram["edit_message_text"].await_args.kwargs
+        assert kwargs["text"] == expected
         assert kwargs["chat_id"] == USER and kwargs["message_id"] == 55
-        telegram["edit_message_text"].assert_not_awaited()
+        telegram["edit_message_media"].assert_not_awaited()
 
     async def test_back_from_a_page_shows_the_new_grid(self, telegram):
         _help_plugins()

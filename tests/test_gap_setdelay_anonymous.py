@@ -383,7 +383,10 @@ class TestAnonymousPolicy:
 
         chat = -100500
         assert identity(real_post(chat, 1, at(0))) is True                       # channel identity
-        assert identity(real_post(chat, 2, at(0), author_signature="Alice")) is True
+        # Signed by Telegram (Sign Messages): an admin's own post, not anonymous.
+        # (Until round 4 this asserted True — the round-2 mistake that deleted
+        # admins' signed posts; see tests/test_anonymous_channel_modes.py.)
+        assert identity(real_post(chat, 2, at(0), author_signature="Alice")) is False
         assert identity(real_post(chat, 3, at(0), personal_user_id=ADMIN)) is False
         assert identity(real_post(chat, 4, at(0), service=MessageServiceType.PINNED_MESSAGE)) is False
         unknown = real_post(chat, 5, at(0), sender_chat_id=None)
@@ -393,13 +396,15 @@ class TestAnonymousPolicy:
         # Another channel's identity is a chat identity too (round 3).
         assert identity(real_post(chat, 6, at(0), sender_chat_id=-100999)) is True
 
-    async def test_signed_channel_identity_post_is_rejected(self, channel):
-        """An author signature is display text, not an identifiable account."""
+    async def test_signed_channel_post_is_kept(self, channel):
+        """Sign Messages on: Telegram signs the admin's post with their name.
+        The post is attributed to an admin, so it is kept (and judged by
+        /setgap) — the bot neither looks the name up nor logs it."""
         await enable_gap(channel.chat_id)
         await enable_anonymous_filter(channel.chat_id)
         await dispatch(channel.new_real_post(501, at(0), author_signature="Alice"))
-        assert not channel.alive(501)
-        assert history_ids(await settings(channel.chat_id)) == []
+        assert channel.alive(501)
+        assert history_ids(await settings(channel.chat_id)) == [501]
 
     async def test_personal_posts_are_allowed_and_judged_by_gap(self, channel):
         await enable_gap(channel.chat_id)

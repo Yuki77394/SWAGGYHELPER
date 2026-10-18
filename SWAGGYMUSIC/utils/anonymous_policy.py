@@ -1,30 +1,54 @@
 """Anonymous-post policy shared by the /setanonymous filter and /setgap.
 
+Telegram shows who posted a channel message in one of three ways, chosen in
+the channel's settings (core.telegram.org/api/channel):
+
+  * ANONYMOUS (default) — every post is published as the channel. Telegram
+    reveals no author at all: no ``from_id``, no signature.
+  * SIGN MESSAGES — Telegram adds a text signature with the posting admin's
+    name (``post_author``, exposed by Kurigram as ``author_signature``). The
+    admin posted from their personal account; Telegram names them but does
+    not expose the account (no ``from_id``).
+  * SIGN MESSAGES + SHOW AUTHORS' PROFILES ("profiles") — each admin picks,
+    per post, their own profile (``from_id`` = the admin's account), the
+    channel itself, or another channel they own.
+
 Policy (applied by ``plugins/misc/anonymous.py`` when /setanonymous is on):
 
-* ALLOW posts where Telegram exposes the personal account that sent them:
-  the raw message's ``from_id`` is a user (Kurigram then sets
-  ``Message.from_user``, e.g. the channel's signatures link to the admins'
-  profiles).
-* REJECT posts sent with a chat identity, whenever the metadata says so:
-    - the channel's OWN identity (``from_id`` omitted or this channel), and
-    - ANOTHER channel's / chat's identity (``from_id`` is that chat;
-      Kurigram exposes it as ``sender_chat``).
-* A visible ``author_signature`` is free text set by Telegram, not an
-  account. It does not make a post identifiable, and nothing here ever
-  treats it as the identity of the admin who posted. When Telegram does
-  not expose the human sender, nobody is "identified": logs name only the
-  sender chat Telegram reported, never a person.
+* KEEP a post Telegram attributes to an admin's personal account:
+    - ``from_id`` is a user (profiles mode, sent as the admin's profile);
+    - or Telegram's author signature is present on a post published through
+      the channel in Sign Messages mode (``SENDER_SIGNED_ADMIN``). The
+      signature is set by Telegram for the admin who posted; the bot uses it
+      only as "this post is signed", never as an identity: it does not look
+      the name up, compare it, store it or log it.
+* DELETE anonymous posts:
+    - published as the channel with no signature (``SENDER_OWN_CHANNEL``);
+    - in profiles mode, published as the channel even though the admin could
+      have posted as their profile — that is the anonymous choice, whatever
+      Telegram puts in ``post_author``;
+    - sent with ANOTHER channel's / chat's identity (``SENDER_OTHER_CHAT``);
+    - sender metadata that cannot be read (``SENDER_UNKNOWN``, fail closed).
 * Service messages (pins, title/photo changes ...) are not posts and are
-  left alone. A post without reliable sender metadata is rejected while the
-  protection is enabled: only a Telegram-exposed personal account is allowed.
+  left alone.
+* In ANONYMOUS mode Telegram hides every author, so EVERY post is deleted
+  while the protection is on. The /setanonymous wizard therefore refuses to
+  enable it until Sign Messages is on, and the filter logs a warning.
+
+History: the original filter kept every post with an author signature. In
+round 2 the signature was mistakenly treated as meaningless text, so admins'
+signed posts in Sign Messages channels were classified ``own_channel`` and
+deleted. The signature rule above restores the original behaviour;
+tests/test_anonymous_channel_modes.py pins every mode.
 
 How the sender is read (``sender_identity``): the raw MTProto ``from_id``
 that Kurigram keeps in ``Message.raw`` is the primary source — it tells a
 user from a chat even when the update omitted the User/Chat object (where
 Kurigram's parsed fields fall back to None or could pick the wrong peer
 type). Messages without a raw update fall back to ``from_user`` /
-``sender_chat``.
+``sender_chat`` / ``author_signature``. The channel's mode comes from the
+channel object Telegram sends with every update (``Chat.sign_messages`` /
+``Chat.show_message_sender_name``).
 
 Coordination with /setgap — the anonymous filter runs in handler group
 -30, the gap/delay engine in group 0 (Kurigram runs groups in ascending
@@ -56,12 +80,20 @@ _REJECTED: "OrderedDict[Tuple[int, int], None]" = OrderedDict()
 
 # sender_identity() results
 SENDER_PERSONAL = "personal"        # Telegram exposed the personal account
-SENDER_OWN_CHANNEL = "own_channel"  # sent with this channel's identity
+SENDER_SIGNED_ADMIN = "signed_admin"  # Sign Messages: Telegram signed it with
+                                      # the posting admin's name (account hidden)
+SENDER_OWN_CHANNEL = "own_channel"  # published as this channel, anonymously
 SENDER_OTHER_CHAT = "other_chat"    # sent with another channel's/chat's identity
 SENDER_UNKNOWN = "unknown"          # no reliable sender metadata
 SENDER_SERVICE = "service"          # service message, not a post
 
 _CHAT_IDENTITIES = (SENDER_OWN_CHANNEL, SENDER_OTHER_CHAT)
+_KEPT_IDENTITIES = (SENDER_PERSONAL, SENDER_SIGNED_ADMIN, SENDER_SERVICE)
+
+# channel_posting_mode() results — the channel's Telegram settings
+MODE_ANONYMOUS = "anonymous"    # Sign Messages off (Telegram's default)
+MODE_SIGNATURES = "signatures"  # Sign Messages on, authors' profiles off
+MODE_PROFILES = "profiles"      # Sign Messages + Show Authors' Profiles
 
 
 def _plain_int(value) -> bool:
@@ -95,20 +127,43 @@ def _raw_sender(message) -> Optional[str]:
     return SENDER_UNKNOWN
 
 
-def sender_identity(message) -> str:
-    """Who Telegram says sent ``message`` — a SENDER_* constant.
+def channel_posting_mode(chat) -> Optional[str]:
+    """The channel's posting mode (a MODE_* constant) from the flags Telegram
+    sends with the channel object, or None when they are not known.
 
-    Never resolves or guesses a person: a chat identity stays a chat
-    identity, and a signature is ignored.
+    Kurigram maps ``channel.signatures`` to ``Chat.sign_messages`` and
+    ``channel.signature_profiles`` to ``Chat.show_message_sender_name`` — on
+    the chat of every update and on ``get_chat``. "min" channel objects may
+    omit flags, so they count as unknown.
     """
-    if isinstance(getattr(message, "service", None), MessageServiceType) or isinstance(
-        getattr(message, "raw", None), raw.types.MessageService,
-    ):
-        return SENDER_SERVICE
-    from_raw = _raw_sender(message)
-    if from_raw is not None:
-        return from_raw
-    # No raw update: Kurigram's parsed fields.
+    if chat is None or getattr(chat, "is_min", None) is True:
+        return None
+    if getattr(chat, "show_message_sender_name", None) is True:
+        return MODE_PROFILES
+    signatures = getattr(chat, "sign_messages", None)
+    if signatures is True:
+        return MODE_SIGNATURES
+    if signatures is False:
+        return MODE_ANONYMOUS
+    return None
+
+
+def has_post_signature(message) -> bool:
+    """True if Telegram signed the post with its author's name (Sign Messages).
+
+    Only presence is reported: the name itself is never returned, so it
+    cannot end up in logs or be used as an identity.
+    """
+    raw_message = getattr(message, "raw", None)
+    if isinstance(raw_message, raw.types.Message):
+        value = raw_message.post_author
+    else:
+        value = getattr(message, "author_signature", None)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _parsed_sender(message) -> str:
+    """Kurigram's parsed fields, for messages without the raw update."""
     if getattr(message, "from_user", None) is not None:
         return SENDER_PERSONAL
     sender_id = getattr(getattr(message, "sender_chat", None), "id", None)
@@ -118,23 +173,46 @@ def sender_identity(message) -> str:
     return SENDER_OWN_CHANNEL if sender_id == chat_id else SENDER_OTHER_CHAT
 
 
+def sender_identity(message) -> str:
+    """Who Telegram says sent ``message`` — a SENDER_* constant.
+
+    Never resolves or guesses a person. A post published through the channel
+    is ``SENDER_SIGNED_ADMIN`` when Telegram signed it (Sign Messages mode):
+    an admin's own post whose account Telegram does not expose. In profiles
+    mode a post published as the channel stays ``SENDER_OWN_CHANNEL`` even if
+    signed — the admin chose the channel over their profile.
+    """
+    if isinstance(getattr(message, "service", None), MessageServiceType) or isinstance(
+        getattr(message, "raw", None), raw.types.MessageService,
+    ):
+        return SENDER_SERVICE
+    sender = _raw_sender(message)
+    if sender is None:
+        sender = _parsed_sender(message)
+    if (
+        sender == SENDER_OWN_CHANNEL
+        and has_post_signature(message)
+        and channel_posting_mode(getattr(message, "chat", None)) != MODE_PROFILES
+    ):
+        return SENDER_SIGNED_ADMIN
+    return sender
+
+
 def is_channel_identity_post(message) -> bool:
-    """True if the post was sent with a chat identity — this channel's own
-    or another channel's/chat's — rather than an exposed personal account."""
+    """True if the post was published anonymously with a chat identity —
+    this channel's own (unsigned) or another channel's/chat's."""
     return sender_identity(message) in _CHAT_IDENTITIES
 
 
-
-
 def should_reject_anonymous_post(message) -> bool:
-    """Return whether anonymous protection should reject this message.
+    """Whether /setanonymous protection deletes this message.
 
-    Only posts whose personal sender is exposed by Telegram are allowed.
-    Chat identities (this channel or another chat) and unknown sender
-    metadata are rejected; service messages are exempt.
+    Kept: posts Telegram attributes to an admin's personal account (exposed
+    profile, or Telegram's signature in Sign Messages mode) and service
+    messages. Deleted: anonymous chat-identity posts and unreadable sender
+    metadata (fail closed).
     """
-    identity = sender_identity(message)
-    return identity in _CHAT_IDENTITIES or identity == SENDER_UNKNOWN
+    return sender_identity(message) not in _KEPT_IDENTITIES
 
 
 def sender_chat_id(message) -> Optional[int]:

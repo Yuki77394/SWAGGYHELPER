@@ -1,11 +1,17 @@
 """Channel anonymous/Send-As post filter.
 
 /setanonymous -> enter channel ID -> ENABLE/DISABLE buttons.
-When enabled, only posts with a Telegram-exposed personal-account sender
-are kept. Channel/chat identity posts and posts with unknown sender metadata
-are deleted; service messages are left alone. Telegram does not expose the
-real admin ID behind channel-identity posts, so this filter cannot identify
-the human behind them.
+When enabled, posts Telegram attributes to an admin's personal account are
+kept: posts sent as the admin's profile (Show Authors' Profiles) and posts
+Telegram signs with the admin's name (Sign Messages). Anonymous posts —
+published as the channel without a signature, or sent with another
+channel's identity — are deleted; service messages are left alone.
+Telegram does not expose the admin behind a signed or channel-identity
+post, and this filter never tries to identify them.
+
+Enabling is refused while the channel's Sign Messages setting is off:
+Telegram then publishes EVERY post anonymously, so the filter would delete
+all of them, the admins' own posts included.
 
 Policy and /setgap coordination: SWAGGYMUSIC/utils/anonymous_policy.py.
 """
@@ -43,6 +49,58 @@ def _menu(channel_id: int):
 
 def _cancel_menu():
     return InlineKeyboardMarkup([[InlineKeyboardButton("❌ CANCEL", callback_data=f"{PREFIX}:cancel", style=ButtonStyle.DANGER)]])
+
+
+# What the protection does in each of Telegram's channel posting modes.
+_MODE_LINES = {
+    anonymous_policy.MODE_ANONYMOUS: (
+        "✍️ <b>Sign Messages:</b> OFF — Telegram publishes every post as the channel "
+        "and hides who wrote it."
+    ),
+    anonymous_policy.MODE_SIGNATURES: (
+        "✍️ <b>Sign Messages:</b> ON — posts signed with an admin's name are kept; "
+        "unsigned posts are deleted."
+    ),
+    anonymous_policy.MODE_PROFILES: (
+        "✍️ <b>Sign Messages + Authors' Profiles:</b> ON — posts sent as an admin's own "
+        "profile are kept; posts sent as the channel or as another channel are deleted."
+    ),
+}
+_SIGN_MESSAGES_OFF = (
+    "⚠️ <b>Sign Messages is OFF in this channel.</b>\n\n"
+    "Telegram then publishes every post as the channel and hides who wrote it, so the "
+    "bot cannot tell your own posts from anonymous ones — protection would delete "
+    "<b>every post</b>, yours included.\n\n"
+    "Turn on <b>Channel settings → Sign Messages</b> (optionally <b>Show Authors' "
+    "Profiles</b>), then enable protection again."
+)
+
+# Channels already warned (in this process) that Sign Messages is off.
+_SIGN_OFF_WARNED = set()
+
+
+def _warn_sign_messages_off(chat_id: int) -> None:
+    if chat_id in _SIGN_OFF_WARNED:
+        return
+    _SIGN_OFF_WARNED.add(chat_id)
+    log.warning(
+        "anonymous protection: Sign Messages is OFF in channel %s — Telegram publishes "
+        "every post there as the channel and hides who wrote it, so EVERY post is deleted "
+        "(admins' own posts included). Turn on Sign Messages (optionally Show Authors' "
+        "Profiles) or disable /setanonymous for this channel.",
+        chat_id,
+    )
+
+
+async def _channel_and_mode(channel_id: int):
+    """(chat, posting mode) — (None, None) if the channel cannot be read."""
+    try:
+        chat = await app.get_chat(channel_id)
+    except Exception as exc:
+        log.warning("setanonymous could not read channel %s: %s: %s",
+                    channel_id, type(exc).__name__, exc)
+        return None, None
+    return chat, anonymous_policy.channel_posting_mode(chat)
 
 
 @app.on_message(filters.command(["setanonymous"]) & filters.private)
@@ -93,13 +151,28 @@ async def setanonymous_callback(_, query: CallbackQuery):
         return
 
     enabled = parts[1] == "enable"
+    chat, mode = await _channel_and_mode(channel_id)
+    if enabled and mode == anonymous_policy.MODE_ANONYMOUS:
+        # Every post would be anonymous, so every post would be deleted.
+        SESSIONS.pop(user_id, None)
+        await query.answer("Turn on Sign Messages in the channel first.", show_alert=True)
+        with suppress(Exception):
+            await query.message.edit_text(
+                f"🛡️ <b>ANONYMOUS POST PROTECTION NOT ENABLED</b>\n\n"
+                f"📌 <b>Channel:</b> {chat.title or 'Channel'}\n"
+                f"🆔 <b>Channel ID:</b> <code>{channel_id}</code>\n\n"
+                + _SIGN_MESSAGES_OFF
+            )
+        log.info("setanonymous enable refused for %s: Sign Messages is off", channel_id)
+        return
     try:
         await settings_db.update_one(
             {"chat_id": channel_id},
             {"$set": {"chat_id": channel_id, "anonymous_filter_enabled": enabled}},
             upsert=True,
         )
-        chat = await app.get_chat(channel_id)
+        if chat is None:
+            chat = await app.get_chat(channel_id)
         status = "ENABLED 🟢" if enabled else "DISABLED 🔴"
         await query.answer("Saved")
         with suppress(Exception):
@@ -107,9 +180,12 @@ async def setanonymous_callback(_, query: CallbackQuery):
                 f"🛡️ <b>ANONYMOUS POST PROTECTION {status}</b>\n\n"
                 f"📌 <b>Channel:</b> {chat.title or 'Channel'}\n"
                 f"🆔 <b>Channel ID:</b> <code>{channel_id}</code>\n\n"
-                + ("Only posts whose personal account Telegram exposes are kept. Channel/chat identity posts "
-                   "and posts with unknown sender information are deleted.\n\n" if enabled else "Protection is now turned off.\n\n")
-                + "<i>Telegram may not reveal the real admin behind a channel-identity post; this filter cannot recover that identity.</i>"
+                + ((_MODE_LINES.get(mode) or (
+                    "Posts Telegram attributes to an admin (own profile, or signed with the admin's "
+                    "name) are kept; anonymous posts are deleted."
+                )) + "\n\n" if enabled else "Protection is now turned off.\n\n")
+                + "<i>Telegram does not reveal which admin is behind a signed or channel-identity post; "
+                "the bot never tries to identify them.</i>"
             )
         SESSIONS.pop(user_id, None)
     except Exception as exc:
@@ -153,11 +229,22 @@ async def setanonymous_channel_input(_, message: Message):
 
     session.update({"step": "action", "channel_id": channel_id})
     current = await settings_db.find_one({"chat_id": channel_id})
-    state = "ON 🟢" if current and current.get("anonymous_filter_enabled") else "OFF 🔴"
+    enabled = bool(current and current.get("anonymous_filter_enabled"))
+    state = "ON 🟢" if enabled else "OFF 🔴"
+    mode = anonymous_policy.channel_posting_mode(chat)
+    mode_line = _MODE_LINES.get(mode)
+    warning = ""
+    if mode == anonymous_policy.MODE_ANONYMOUS:
+        warning = ("\n\n⚠️ <b>Protection deletes every post while Sign Messages is off.</b> "
+                   "Turn it on in Channel settings first." if enabled else
+                   "\n\n⚠️ Turn on <b>Sign Messages</b> in Channel settings before enabling.")
     await message.reply_text(
         f"📌 <b>Channel:</b> {chat.title or 'Channel'}\n"
         f"🆔 <b>Channel ID:</b> <code>{channel_id}</code>\n"
-        f"🛡️ <b>Current status:</b> {state}\n\nChoose an action:",
+        f"🛡️ <b>Current status:</b> {state}"
+        + (f"\n{mode_line}" if mode_line else "")
+        + warning
+        + "\n\nChoose an action:",
         reply_markup=_menu(channel_id),
     )
 
@@ -170,17 +257,20 @@ def _post_time(message: Message) -> int:
 
 @app.on_message(filters.channel & filters.incoming, group=-30)
 async def anonymous_post_filter(_, message: Message):
-    """Reject chat-identity posts while /setanonymous is enabled.
+    """Reject anonymous posts while /setanonymous is enabled.
 
     Policy (anonymous_policy.should_reject_anonymous_post):
-      * posts whose personal account Telegram exposes (raw ``from_id`` is a
-        user) are allowed;
-      * posts sent with this channel's or another chat's identity are rejected;
-      * unknown sender metadata is rejected (fail closed); service messages
-        are exempt. An ``author_signature`` is free text, not an account.
-    Telegram does not reveal the human admin behind a chat-identity post, so
-    this filter never claims to identify one: it logs only the sender chat
-    Telegram reported.
+      * kept — posts Telegram attributes to an admin's personal account:
+        sent as the admin's profile (raw ``from_id`` is a user), or signed by
+        Telegram with the admin's name in Sign Messages mode;
+      * deleted — published as the channel without a signature (or as the
+        channel in Authors' Profiles mode), sent with another chat's
+        identity, or unreadable sender metadata (fail closed);
+      * service messages are exempt.
+    Telegram does not reveal the human admin behind a signed or chat-identity
+    post, so this filter never identifies one: it logs only the identity
+    class, the channel's posting mode, whether the post was signed (never the
+    name) and the sender chat Telegram reported.
 
     Runs in group -30, before the /setgap engine (group 0) handles the same
     update. The verdict is recorded BEFORE any Telegram call, so a rejected
@@ -198,6 +288,10 @@ async def anonymous_post_filter(_, message: Message):
         setting = await settings_db.find_one({"chat_id": message.chat.id}, {"anonymous_filter_enabled": 1})
         if not setting or not setting.get("anonymous_filter_enabled"):
             return
+        identity = anonymous_policy.sender_identity(message)
+        mode = anonymous_policy.channel_posting_mode(message.chat)
+        if mode == anonymous_policy.MODE_ANONYMOUS:
+            _warn_sign_messages_off(message.chat.id)
 
         # Verdict first: in-process for the later handler groups of this
         # update, then in MongoDB for the /setgap engine's atomic accept.
@@ -240,10 +334,10 @@ async def anonymous_post_filter(_, message: Message):
             )
             return
         log.info(
-            "anonymous post deleted chat=%s message=%s identity=%s sender_chat=%s "
-            "(chat identity; Telegram does not reveal which admin sent it)",
-            message.chat.id, message.id,
-            anonymous_policy.sender_identity(message),
+            "anonymous post deleted chat=%s message=%s identity=%s channel_mode=%s signed=%s "
+            "sender_chat=%s (not attributed to an admin's account; the bot never names an admin)",
+            message.chat.id, message.id, identity, mode or "unknown",
+            "yes" if anonymous_policy.has_post_signature(message) else "no",
             anonymous_policy.sender_chat_id(message),
         )
     except RPCError as exc:

@@ -1,0 +1,15 @@
+# Test-only dependencies — NOT installed on Heroku (Heroku reads requirements.txt).
+#
+#   pip install -r requirements-test.txt
+#   python -m pytest -q
+#
+# Pinned to the versions the test suite was verified with. motor/pymongo
+# are pinned here because mongomock-motor (the in-memory MongoDB used by the
+# tests) follows their internals closely.
+-r requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.3.0
+mongomock==4.3.0
+mongomock-motor==0.0.36
+motor==3.7.1
+pymongo==4.10.1

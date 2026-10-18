@@ -16,7 +16,7 @@
 | -------------- | -------------- | ------------------------------------------------------------------------------------------- |
 | `/setdelay NsNm Nh \| off` | Channels only | Auto-delete every new channel post after a delay (3 s .. 24 h). Delay is counted from the **original post time** and never changes on edit. |
 | `/setgap NsNm Nh \| off`   | Channels only | Enforce a minimum interval between **accepted** channel posts that still exist. Rejected and edited posts never reset/extend the gap; if you manually delete the latest accepted post, the gap counts from the previous one. A **media album** (photos/videos sent together) is one post: allowed or deleted as a whole. Re-running `/setgap` with the **same** duration keeps the running timer; a new duration starts a fresh window. Per-channel, not per-user. |
-| `/setanonymous` | PM with the bot | Per-channel anonymous-post protection (ENABLE/DISABLE). When on, only posts whose personal account Telegram exposes are kept. Posts sent with a channel/chat identity or with unknown sender metadata are deleted (service messages are exempt). An author signature alone is not an identity, and the bot never claims to know which admin sent a channel-identity post. |
+| `/setanonymous` | PM with the bot | Per-channel anonymous-post protection (ENABLE/DISABLE). When on, posts Telegram attributes to an admin are kept — signed with the admin's name (**Sign Messages**) or sent as the admin's own profile (**Show Authors' Profiles**). Anonymous posts are deleted: unsigned posts as the channel, posts as another channel, unknown senders (service messages are exempt). Requires **Sign Messages** on in the channel — otherwise Telegram hides every author, so enabling is refused. The bot never looks up or names an admin. |
 | `/createpost`  | PM with the bot | Interactive Post Creator — Hidden Video Preview or Normal Post (Format 1 / Format 2) with manual text, video, photo, button styles, preview, cancel, back. |
 
 `/setdelay on` and `/setgap on` are intentionally **invalid** — the bot replies
@@ -75,11 +75,22 @@ All user-facing commands:
   deleted manually, even if its deadline has passed. If a delete call's
   outcome is unknown (network error) and the retry hits FloodWait, the
   post keeps counting until Telegram's answer settles it.
-* **`/setanonymous` identity rules** — the sender is read from Telegram's
-  raw `from_id`: a personal account is allowed; the channel's own identity
-  or another channel's/chat's identity is rejected; unknown sender metadata
-  is rejected (service messages are exempt). The bot logs only the sender
-  chat Telegram reports and never names an admin.
+* **`/setanonymous` identity rules** — Telegram has three channel modes
+  (Channel settings → Administrators):
+  * *Sign Messages off* (default): every post is published as the channel
+    and Telegram hides who wrote it. Protection would delete **every** post,
+    so the wizard refuses to enable it and the filter logs a warning.
+  * *Sign Messages on*: Telegram signs each admin's post with their name.
+    Signed posts are kept; an unsigned post is deleted.
+  * *Sign Messages + Show Authors' Profiles*: admins choose per post, in
+    the message bar, to post as their own profile (kept), as the channel or
+    as another channel (deleted).
+
+  The sender is read from Telegram's raw update (`from_id`, `post_author`)
+  and the channel's flags. Unknown sender metadata is rejected; service
+  messages are exempt. The signature only tells the bot *that* the post is
+  signed — it is never looked up or logged; deletion logs show the identity
+  class, the channel mode and `signed=yes/no`.
 * **`/setanonymous` + `/setgap`** — the anonymous filter runs first
   (handler group -30). A post it rejects is never judged or recorded by
   the gap (group 0) — even if deleting it fails — and the verdict is

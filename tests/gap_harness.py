@@ -128,13 +128,29 @@ def other_channel_raw_id() -> int:
     return next(_OTHER_CHANNEL_IDS)
 
 
-def _raw_channel(raw_id: int, title: str):
+# Telegram's three channel posting modes (core.telegram.org/api/channel):
+#   "anonymous"  — default: every post is published as the channel, no author;
+#   "signatures" — Sign Messages on: posts carry the admin's name (post_author);
+#   "profiles"   — Sign Messages + Show Authors' Profiles: each admin chooses
+#                  to post as their own profile (from_id = user), as the
+#                  channel, or as another channel they own.
+CHANNEL_MODE_FLAGS = {
+    None: (None, None),           # flags unknown (not set on the object)
+    "anonymous": (False, False),
+    "signatures": (True, False),
+    "profiles": (True, True),
+}
+
+
+def _raw_channel(raw_id: int, title: str, mode: Optional[str] = None):
     from pyrogram import raw
 
+    signatures, profiles = CHANNEL_MODE_FLAGS[mode]
     # Vector fields default to [] exactly as TLObject.read() leaves them.
     return raw.types.Channel(
         id=raw_id, title=title, photo=raw.types.ChatPhotoEmpty(), date=0,
         broadcast=True, access_hash=raw_id * 7, usernames=[], restriction_reason=[],
+        signatures=signatures, signature_profiles=profiles,
     )
 
 
@@ -170,7 +186,8 @@ async def tg_post(ch: "FakeBotChannel", msg_id: int, when: datetime, text: str =
                   user_id: Optional[int] = None, user_in_update: bool = True,
                   sender_channel_id: Optional[int] = None,
                   media: Optional[str] = None, grouped_id: Optional[int] = None,
-                  post_author: Optional[str] = None, alive: bool = True):
+                  post_author: Optional[str] = None, alive: bool = True,
+                  channel_mode: Optional[str] = None):
     """A channel post as Kurigram parses it from Telegram's raw update.
 
     Sender (``from_id`` of the raw message):
@@ -183,13 +200,16 @@ async def tg_post(ch: "FakeBotChannel", msg_id: int, when: datetime, text: str =
       * ``sender_channel_id``  -> PeerChannel: sent with that channel's identity
                                   (a raw channel id; may be this channel's).
     ``media`` "photo"/"video" + ``grouped_id`` build album items.
+    ``channel_mode`` sets the channel's Sign Messages / Show Authors'
+    Profiles flags in the update (see CHANNEL_MODE_FLAGS); ``post_author`` is
+    the signature Telegram adds when Sign Messages is on.
     """
     from pyrogram import raw, types, utils
 
     from SWAGGYMUSIC import app
 
     channel_raw_id = utils.get_raw_peer_id(ch.chat_id)
-    chats = {channel_raw_id: _raw_channel(channel_raw_id, "Test channel")}
+    chats = {channel_raw_id: _raw_channel(channel_raw_id, "Test channel", channel_mode)}
     users = {}
     from_id = None
     if user_id is not None:
