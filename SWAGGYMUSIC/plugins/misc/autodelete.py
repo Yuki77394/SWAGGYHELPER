@@ -137,13 +137,23 @@ MEDIA ALBUMS:
     the album as one post that counts while any of its items counts.
 
 /SETANONYMOUS INTERACTION:
-    The anonymous filter runs first (group -30). A post it rejects is
+    The anonymous filter (group -30) runs after the /setlink filter
+    (group -40) and before this handler. A post it rejects is
     marked in-process and persisted in ``anon_rejected_msg_ids``; this
     handler skips it and the atomic accept refuses such ids, so a rejected
     post can never become the /setgap reference (see
     SWAGGYMUSIC/utils/anonymous_policy.py). Service messages (pins, title
     changes ...) are not posts: they are never judged or recorded by the
     gap.
+
+/SETLINK INTERACTION:
+    The link filter (SWAGGYMUSIC/plugins/misc/setlink.py) runs even
+    earlier, in group -40. A post it rejects — a prohibited link, or any
+    item of a media album it condemned — is marked in-process
+    (link_policy.was_rejected); this handler skips it, so a link-deleted
+    post can never become the /setgap reference or a /setdelay job. Its
+    deletion (or FloodWait retry, reason ``LINK_REJECT_RETRY``) is
+    handled by the link filter.
 
 DELAY + GAP TOGETHER:
     Both work independently. A post that violates the gap is deleted
@@ -172,7 +182,7 @@ from pymongo import ReturnDocument
 from SWAGGYMUSIC import app
 from SWAGGYMUSIC.core.mongo import mongodb
 from SWAGGYMUSIC.logging import LOGGER
-from SWAGGYMUSIC.utils import anonymous_policy
+from SWAGGYMUSIC.utils import anonymous_policy, link_policy
 from SWAGGYMUSIC.utils.activity_logger import (_format_duration,
                                                log_setdelay_change,
                                                log_setgap_change)
@@ -309,6 +319,11 @@ def _is_setdelay_command(message: Message) -> bool:
 def _is_setgap_command(message: Message) -> bool:
     text = message.text or message.caption or ""
     return bool(re.match(r"(?i)^/setgap(?:@\w+)?(?:\s+.+?)?\s*$", text))
+
+
+def _is_setlink_command(message: Message) -> bool:
+    text = message.text or message.caption or ""
+    return bool(re.match(r"(?i)^/setlink(?:@\w+)?(?:\s+.+?)?\s*$", text))
 
 
 def _post_unix_time(message: Message) -> int:
@@ -1777,6 +1792,18 @@ async def autodelete_new_channel_post(_, message: Message):
             )
             return
 
+        # /SETLINK COORDINATION — the link filter (group -40) has already
+        # run for this very update. A post it rejected (prohibited link,
+        # or any item of an album it condemned) is never judged by the
+        # gap (so it can never become the reference) and never queued for
+        # /setdelay; its deletion is handled by the link filter.
+        if link_policy.was_rejected(message.chat.id, message.id):
+            log.info(
+                "gap/delay skipped chat=%s msg=%s: rejected by link filter",
+                message.chat.id, message.id,
+            )
+            return
+
         setting = await settings_db.find_one({"chat_id": message.chat.id})
         if not setting:
             return
@@ -1786,7 +1813,9 @@ async def autodelete_new_channel_post(_, message: Message):
         if not await _bot_can_delete(message.chat.id):
             return
 
-        is_command = _is_setdelay_command(message) or _is_setgap_command(message)
+        is_command = (_is_setdelay_command(message)
+                      or _is_setgap_command(message)
+                      or _is_setlink_command(message))
 
         # Use the ORIGINAL Telegram post timestamp for gap calculations
         # (not time.time()) so the gap is measured from the actual post

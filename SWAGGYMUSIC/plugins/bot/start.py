@@ -11,8 +11,8 @@
 # 🎉 celebration message effect, "SWAGGY" Unicode typography, Owner button,
 # Network button, Help button, Support button, fancy Unicode caption).
 # The caption is rewritten to advertise Auto Delete / Set Delay, Post Gap
-# Control, Create Post and Anonymous Post Protection instead of music
-# playback.
+# Control, Create Post, Anonymous Post Protection and Link Restriction
+# instead of music playback.
 
 import html
 import json

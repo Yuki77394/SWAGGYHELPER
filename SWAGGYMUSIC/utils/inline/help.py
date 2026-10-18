@@ -7,9 +7,11 @@
 #
 # Help panel — standalone channel-management build.
 #
-# Four categories, shown as 2 rows x 2 buttons (navigation row below):
+# Five categories: the original 2 rows x 2 buttons plus the
+# Link Restriction row added with /setlink (navigation row below):
 #     hb1 — Set Delay      (/setdelay)      hb2 — Set Gap        (/setgap)
 #     hb3 — Create Post    (/createpost)    hb4 — Anonymous Post (/setanonymous)
+#     hb5 — Link Restriction (/setlink)
 # Music-only categories (Play, VPlay, CPlay, Pause/Resume/Skip/Stop, Queue,
 # Autoplay, Filters, Thumbnails, Sudo, VC Logger, etc.) have been removed.
 # Premium custom-emoji icons have been removed from buttons because they
@@ -62,6 +64,13 @@ def help_pannel(_, START: Union[bool, int] = None):
                 InlineKeyboardButton(
                     text=_["H_B_4"],
                     callback_data="help_callback hb4",
+                    style=ButtonStyle.PRIMARY,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_["H_B_5"],
+                    callback_data="help_callback hb5",
                     style=ButtonStyle.PRIMARY,
                 ),
             ],

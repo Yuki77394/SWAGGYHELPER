@@ -7,10 +7,11 @@
 #
 # /help handler — standalone channel-management build.
 #
-# The Help panel exposes the four channel-management features
-# (2 rows x 2 buttons):
+# The Help panel exposes the five channel-management features
+# (2 rows x 2 buttons, plus the Link Restriction row):
 #     Set Delay   (hb1)      Set Gap        (hb2)
 #     Create Post (hb3)      Anonymous Post (hb4, /setanonymous)
+#     Link Restriction (hb5, /setlink)
 # All music-related buttons and helper pages have been removed.
 
 from typing import Union
@@ -110,6 +111,7 @@ async def helper_cb(client, CallbackQuery, _):
         "hb2": helpers.HELP_2,
         "hb3": helpers.HELP_3,
         "hb4": helpers.HELP_4,
+        "hb5": helpers.HELP_5,
     }.get(cb)
     if page is not None:
         await _edit_callback_message(CallbackQuery, page, reply_markup=keyboard)

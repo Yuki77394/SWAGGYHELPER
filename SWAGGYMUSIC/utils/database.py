@@ -46,8 +46,13 @@ sudo system, banned-user filter, and the autodelete/setgap collections.
     ],
     anonymous_filter_enabled: <bool>,     # /setanonymous
     anon_rejected_msg_ids: [<int>, ...]   # newest 200 posts rejected by the
-  }                                       # anonymous filter (never accepted
+                                          # anonymous filter (never accepted
                                           # as /setgap references)
+    link_filter_enabled: <bool>,          # /setlink — delete channel posts
+                                          # that carry prohibited links
+    link_blocked_albums: [<int>, ...]     # newest 50 media-group ids the link
+  }                                       # filter condemned (whole-album rule
+                                          # survives a restart mid-delivery)
 
   autodelete_jobs  — one document per pending deletion
   ------------------------------------------------------------
@@ -68,7 +73,8 @@ sudo system, banned-user filter, and the autodelete/setgap collections.
                                                 #  NOT increment this)
     original_post_time:   <int unix ts>,        # immutable after $setOnInsert
     reason:               "GAP_REJECT_RETRY"    # only on retry jobs for
-                          | "ANON_REJECT_RETRY",#  rejected posts (FloodWait)
+                          | "ANON_REJECT_RETRY" #  rejected posts (FloodWait)
+                          | "LINK_REJECT_RETRY",#  (see link_policy)
     inflight:             <bool>                # a delete call was sent and
                                                 #  its outcome is unknown
   }
@@ -565,9 +571,9 @@ async def set_gap_duration(chat_id: int, seconds: int) -> Tuple[str, int]:
 async def delete_settings_if_unused(chat_id: int) -> bool:
     """Delete a channel's settings document only if NO feature uses it.
 
-    /setgap, /setdelay and /setanonymous all live in this document, so it
-    may only go when all three are off. Done as one conditional delete so
-    a feature enabled concurrently is never wiped.
+    /setgap, /setdelay, /setanonymous and /setlink all live in this
+    document, so it may only go when all four are off. Done as one
+    conditional delete so a feature enabled concurrently is never wiped.
     """
     result = await settings_db.delete_one({
         "chat_id": chat_id,
@@ -576,8 +582,63 @@ async def delete_settings_if_unused(chat_id: int) -> bool:
         "enabled": {"$ne": True},
         "delay": {"$exists": False},
         "anonymous_filter_enabled": {"$ne": True},
+        "link_filter_enabled": {"$ne": True},
     })
     return bool(result.deleted_count)
+
+
+async def set_link_filter_enabled(chat_id: int, enabled: bool) -> str:
+    """Enable or disable /setlink for one channel.
+
+    Used by the channel command and the private-chat wizard. Returns
+    ``"ENABLED"``, ``"DISABLED"`` or ``"NO_CHANGE"`` (the setting already
+    had this value — nothing was written). Disabling also drops the
+    channel's condemned-album list and removes the settings document when
+    no other feature uses it.
+    """
+    chat_id = int(chat_id)
+    if await settings_db.find_one(
+        {"chat_id": chat_id, "link_filter_enabled": bool(enabled)}, {"_id": 1},
+    ):
+        return "NO_CHANGE"
+    if enabled:
+        await settings_db.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"chat_id": chat_id, "link_filter_enabled": True}},
+            upsert=True,
+        )
+        return "ENABLED"
+    result = await settings_db.update_one(
+        {"chat_id": chat_id, "link_filter_enabled": True},
+        {"$unset": {"link_filter_enabled": "", "link_blocked_albums": ""}},
+    )
+    if not result.modified_count:
+        return "NO_CHANGE"
+    await delete_settings_if_unused(chat_id)
+    return "DISABLED"
+
+
+# How many condemned album ids are kept per channel in MongoDB
+# (link_policy documents the whole-album rule this bound serves).
+LINK_BLOCKED_ALBUMS_LIMIT = 50
+
+
+async def remember_blocked_album(chat_id: int, media_group_id: int) -> None:
+    """Persist a condemned album id in the channel's settings document.
+
+    Keeps the newest ``LINK_BLOCKED_ALBUMS_LIMIT`` ids so the whole-album
+    rule survives a restart between album-item deliveries (mirrors the
+    /setgap engine's ``gap_albums`` persistence). Best-effort: callers
+    treat a failure as "album tracked in-process only".
+    """
+    await settings_db.update_one(
+        {"chat_id": int(chat_id)},
+        {"$push": {"link_blocked_albums": {
+            "$each": [int(media_group_id)],
+            "$slice": -LINK_BLOCKED_ALBUMS_LIMIT,
+        }}},
+        upsert=True,
+    )
 
 
 def deletion_job_document(

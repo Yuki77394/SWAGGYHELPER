@@ -17,6 +17,7 @@
 | `/setdelay NsNm Nh \| off` | Channels only | Auto-delete every new channel post after a delay (3 s .. 24 h). Delay is counted from the **original post time** and never changes on edit. |
 | `/setgap NsNm Nh \| off`   | Channels only | Enforce a minimum interval between **accepted** channel posts that still exist. Rejected and edited posts never reset/extend the gap; if you manually delete the latest accepted post, the gap counts from the previous one. A **media album** (photos/videos sent together) is one post: allowed or deleted as a whole. Re-running `/setgap` with the **same** duration keeps the running timer; a new duration starts a fresh window. Per-channel, not per-user. |
 | `/setanonymous` | PM with the bot | Per-channel anonymous-post protection (ENABLE/DISABLE). When on, posts Telegram attributes to an admin are kept — signed with the admin's name (**Sign Messages**) or sent as the admin's own profile (**Show Authors' Profiles**). Anonymous posts are deleted: unsigned posts as the channel, posts as another channel, unknown senders (service messages are exempt). Requires **Sign Messages** on in the channel — otherwise Telegram hides every author, so enabling is refused. The bot never looks up or names an admin. |
+| `/setlink on \| off` | Channels only (+ PM wizard) | **All-Link Blocker** — delete channel posts that carry links: HTTP/HTTPS and `www.` URLs, recognizable site URLs (Instagram, YouTube, Facebook, WhatsApp …), `t.me` / invite / `tg://` links, and any text, @username or emoji hiding a clickable URL (Telegram TEXT_LINK entities). Checked in text, captions, forwards, **edited** posts and media albums — an album containing a link is deleted whole. Plain **@usernames with no URL attached are always allowed**; e-mail addresses and ordinary text are never touched. |
 | `/createpost`  | PM with the bot | Interactive Post Creator — Hidden Video Preview or Normal Post (Format 1 / Format 2) with manual text, video, photo, button styles, preview, cancel, back. |
 
 `/setdelay on` and `/setgap on` are intentionally **invalid** — the bot replies
@@ -24,7 +25,7 @@ with the help text.
 
 All user-facing commands:
 
-`/start`, `/help`, `/privacy`, `/setdelay`, `/setgap`, `/setanonymous`, `/createpost`, `/cancel`
+`/start`, `/help`, `/privacy`, `/setdelay`, `/setgap`, `/setanonymous`, `/setlink`, `/createpost`, `/cancel`
 
 (`/cancel` is part of the Create Post workflow.)
 

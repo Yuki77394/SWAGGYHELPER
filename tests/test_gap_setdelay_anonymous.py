@@ -104,7 +104,8 @@ class TestReproductions:
         await enable_gap(channel.chat_id)
         await enable_anonymous_filter(channel.chat_id)
         ran = await dispatch(channel.new_real_post(131, at(0)))      # channel identity
-        assert ran[0] == "anonymous_post_filter"
+        # Group order: link filter (-40) first, anonymous filter (-30) next.
+        assert ran[:2] == ["link_blocker_new_channel_post", "anonymous_post_filter"]
         assert not channel.alive(131)
         doc = await settings(channel.chat_id)
         assert history_ids(doc) == [] and "last_gap_post_msg_id" not in doc
@@ -432,7 +433,10 @@ class TestAnonymousPolicy:
         await enable_gap(channel.chat_id, gap=600)
         await enable_anonymous_filter(channel.chat_id)
         ran = await dispatch(channel.new_real_post(531, at(0), "/setgap 15m"))
-        assert ran[:2] == ["anonymous_post_filter", "setgap_handler"]
+        # Group order: link filter (-40) first, anonymous filter (-30),
+        # then the /setgap command handler (-19) still processes the post.
+        assert ran[:3] == ["link_blocker_new_channel_post",
+                           "anonymous_post_filter", "setgap_handler"]
         assert (await settings(channel.chat_id))["gap"] == 900
         assert not channel.alive(531)
 

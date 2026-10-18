@@ -78,7 +78,9 @@ class TestReportedBug:
         assert post.from_user is None and post.sender_chat.id == channel.chat_id  # Kurigram view
         assert post.author_signature == NAME
         ran = await dispatch(post)
-        assert ran[0] == "anonymous_post_filter"
+        # Group order: the link filter (-40) runs first and passes the post
+        # through; the anonymous filter (-30) judges it next.
+        assert ran[:2] == ["link_blocker_new_channel_post", "anonymous_post_filter"]
         assert channel.alive(101), "a signed admin post must not be deleted"
         doc = await settings(channel.chat_id)
         assert 101 not in (doc.get("anon_rejected_msg_ids") or [])

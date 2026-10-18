@@ -101,7 +101,8 @@ class TestOtherChannelIdentityEndToEnd:
         await enable_anonymous_filter(channel.chat_id)
         post = await tg_post(channel, 11, at(0), sender_channel_id=other_channel_raw_id())
         ran = await dispatch(post)
-        assert ran[0] == "anonymous_post_filter"
+        # Group order: link filter (-40) first, anonymous filter (-30) next.
+        assert ran[:2] == ["link_blocker_new_channel_post", "anonymous_post_filter"]
         assert not channel.alive(11)
         doc = await settings(channel.chat_id)
         assert history_ids(doc) == [] and "last_gap_post_msg_id" not in doc

@@ -378,6 +378,52 @@ async def log_setgap_change(
     await log_activity(text)
 
 
+async def log_setlink_change(
+    chat, user, status: str, *,
+    source: str = "CHANNEL",
+) -> None:
+    """Log a /setlink state change for a specific channel.
+
+    Parameters
+    ----------
+    chat : pyrogram.types.Chat
+        The channel where the change happened (``message.chat``).
+    user : pyrogram.types.User or None
+        The admin who issued the command.  None for anonymous channel posts.
+    status : str
+        One of ``"ENABLED"``, ``"DISABLED"``.
+    source : str
+        ``"CHANNEL"`` or ``"PRIVATE CHAT"`` — where the change was made.
+    """
+
+    ch_title = _format_channel_title(chat)
+    ch_id = _format_channel_id(chat)
+    ch_uname = _format_channel_username(chat)
+    actor = _build_mention(user) if user is not None else "Channel Admin"
+    actor_id = _format_user_id(user)
+    timestamp = _format_timestamp()
+
+    if status == "ENABLED":
+        header = "🟢 <b>LINK RESTRICTION ENABLED</b>"
+    elif status == "DISABLED":
+        header = "🔴 <b>LINK RESTRICTION DISABLED</b>"
+    else:
+        header = f"🔗 <b>LINK RESTRICTION {html.escape(status, quote=False)}</b>"
+
+    text = (
+        f"{header}\n\n"
+        f"📍 <b>Source:</b> {html.escape(source, quote=False)}\n\n"
+        f"📌 <b>Channel:</b> {ch_title}\n"
+        f"🆔 <b>Channel ID:</b> <code>{ch_id}</code>\n"
+        f"🔗 <b>Username:</b> {ch_uname}\n\n"
+        f"👤 <b>Changed By:</b> {actor}\n"
+        f"🆔 <b>User ID:</b> <code>{actor_id}</code>\n\n"
+        f"📊 <b>Status:</b> {status}\n\n"
+        f"🕐 <b>Time:</b> <code>{timestamp}</code>"
+    )
+    await log_activity(text)
+
+
 async def log_logger_toggle(user, action: str) -> None:
     """Log that the /logger command itself was toggled.
 

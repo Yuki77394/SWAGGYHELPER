@@ -1,5 +1,6 @@
-"""Help & Commands menu: 2 rows x 2 category buttons, the new
-"Anonymous Post" page (/setanonymous), and every existing button/callback.
+"""Help & Commands menu: 2 rows x 2 category buttons, the
+"Anonymous Post" page (/setanonymous), the "Link Restriction" page
+(/setlink), and every existing button/callback.
 
 Callback queries are REAL ``pyrogram.types.CallbackQuery`` objects delivered
 through the handlers actually registered on ``app`` (gap_harness.
@@ -24,7 +25,8 @@ from pyrogram.enums import ButtonStyle, ChatType, ParseMode
 
 USER = 777
 GRID = [["help_callback hb1", "help_callback hb2"],
-        ["help_callback hb3", "help_callback hb4"]]
+        ["help_callback hb3", "help_callback hb4"],
+        ["help_callback hb5"]]
 
 
 def _strings():
@@ -97,17 +99,18 @@ class TestLayout:
 
         _ = _strings()
         rows = _rows(help_pannel(_, start))
-        assert len(rows) == 3
-        assert [[data for _t, data, _s in row] for row in rows[:2]] == GRID
-        assert [[text for text, _d, _s in row] for row in rows[:2]] == [
-            [_["H_B_1"], _["H_B_2"]], [_["H_B_3"], _["H_B_4"]]]
-        assert all(style == ButtonStyle.PRIMARY for row in rows[:2] for _t, _d, style in row)
-        assert rows[2] == [(_[nav_label], nav_data, ButtonStyle.DANGER)]
+        assert len(rows) == 4
+        assert [[data for _t, data, _s in row] for row in rows[:3]] == GRID
+        assert [[text for text, _d, _s in row] for row in rows[:3]] == [
+            [_["H_B_1"], _["H_B_2"]], [_["H_B_3"], _["H_B_4"]], [_["H_B_5"]]]
+        assert all(style == ButtonStyle.PRIMARY for row in rows[:3] for _t, _d, style in row)
+        assert rows[3] == [(_[nav_label], nav_data, ButtonStyle.DANGER)]
 
     def test_labels(self):
         _ = _strings()
         assert (_["H_B_1"], _["H_B_2"], _["H_B_3"]) == ("sєᴛ ᴅєʟᴀʏ", "sєᴛ ɢᴀᴘ", "ᴄʀєᴀᴛє ᴘᴏsᴛ")
         assert _["H_B_4"] == "ᴀɴᴏɴʏᴍᴏᴜs ᴘᴏsᴛ"   # "Anonymous Post" in the menu's small caps
+        assert _["H_B_5"] == "ʟɪɴᴋ ʀєsᴛʀɪᴄᴛɪᴏɴ"   # "Link Restriction", same small-caps style
 
     def test_category_page_back_button_unchanged(self):
         from SWAGGYMUSIC.utils.inline.help import help_back_markup
@@ -139,6 +142,7 @@ class TestCallbacks:
             "help_callback hb2": help_mod.helper_cb,
             "help_callback hb3": help_mod.helper_cb,
             "help_callback hb4": help_mod.helper_cb,
+            "help_callback hb5": help_mod.helper_cb,
             "close": help_mod.close_helper,
             "settingsback_helper": start_mod.back_to_start_home,   # BACK -> Start panel
             "settings_back_helper": help_mod.helper_private,       # page BACK -> help menu
@@ -152,6 +156,7 @@ class TestCallbacks:
 
     @pytest.mark.parametrize("cb, page", [
         ("hb1", "HELP_1"), ("hb2", "HELP_2"), ("hb3", "HELP_3"), ("hb4", "HELP_4"),
+        ("hb5", "HELP_5"),
     ])
     async def test_category_shows_its_page_with_back_button(self, telegram, cb, page):
         from strings import helpers
@@ -179,6 +184,7 @@ class TestCallbacks:
 
     @pytest.mark.parametrize("cb, page", [
         ("hb1", "HELP_1"), ("hb2", "HELP_2"), ("hb3", "HELP_3"), ("hb4", "HELP_4"),
+        ("hb5", "HELP_5"),
     ])
     async def test_category_callback_edits_photo_caption_not_text(self, telegram, monkeypatch, cb, page):
         from strings import helpers
@@ -267,16 +273,18 @@ class TestAnonymousPostPage:
     def test_same_typography_as_setdelay_and_setgap(self):
         from strings import helpers
 
-        for page in (helpers.HELP_1, helpers.HELP_2, helpers.HELP_4):
+        for page in (helpers.HELP_1, helpers.HELP_2, helpers.HELP_4, helpers.HELP_5):
             assert page.startswith("<b><u>❖ ʜᴇʟᴘ ғᴏʀ ")
             assert re.search(r"^<b><u>❖ .+ :</u></b>$", page, re.M)       # section title
             assert re.search(r"^<b>๏ /\w+.* -</b> ", page, re.M)          # command lines
             assert re.search(r"^<b>❖ .+ :</b>$", page, re.M)              # sub-sections
             assert re.search(r"^• ", page, re.M)                           # bullets
         # Small caps everywhere except commands: no ASCII lowercase letters
-        # beyond those the existing pages already use for the style.
+        # beyond those the existing pages already use for the style. HELP_5
+        # is part of the allowed alphabet (its command lines bring "on").
         allowed = (_ascii_lower_outside_commands(helpers.HELP_1)
-                   | _ascii_lower_outside_commands(helpers.HELP_2))
+                   | _ascii_lower_outside_commands(helpers.HELP_2)
+                   | _ascii_lower_outside_commands(helpers.HELP_5))
         assert _ascii_lower_outside_commands(helpers.HELP_4) <= allowed
 
     async def test_every_help_page_fits_a_photo_caption(self):
@@ -286,7 +294,92 @@ class TestAnonymousPostPage:
 
         from strings import helpers
 
-        for name in ("HELP_1", "HELP_2", "HELP_3", "HELP_4"):
+        for name in ("HELP_1", "HELP_2", "HELP_3", "HELP_4", "HELP_5"):
             parsed = await Parser(None).parse(getattr(helpers, name), ParseMode.HTML)
             length = len(parsed["message"].encode("utf-16-le")) // 2
             assert length <= 1024, f"{name} is {length} characters"
+
+
+# ---------------------------------------------------------------------------
+# The Link Restriction page (/setlink — ALL-LINK BLOCKER)
+# ---------------------------------------------------------------------------
+
+class TestLinkRestrictionPage:
+    def test_explains_commands_what_is_blocked_and_the_username_rule(self):
+        from strings import helpers
+
+        text = _visible(helpers.HELP_5)
+        assert "/setlink" in text
+        for words in ("ʟɪɴᴋ ʀᴇsᴛʀɪᴄᴛɪᴏɴ",                      # purpose / title
+                      "ᴇɴᴀʙʟᴇ", "ᴅɪsᴀʙʟᴇ", "ᴏɴ", "ᴏғғ",           # ON/OFF controls
+                      "ᴄʜᴀɴɴᴇʟ ɪᴅ",                              # the wizard's input
+                      "ʜᴛᴛᴘ", "ᴡᴡᴡ",                             # URL kinds
+                      "ᴛ.ᴍᴇ", "ɪɴᴠɪᴛᴇ",                          # Telegram + invites
+                      "ᴇᴍᴏᴊɪs",                                  # hidden behind emojis
+                      "ᴇᴅɪᴛᴇᴅ ᴘᴏsᴛs",                            # edits never bypass
+                      "ᴀʟʙᴜᴍ",                                   # whole-album rule
+                      "@ᴜsᴇʀɴᴀᴍᴇs",                              # the ALLOW rule
+                      "ᴅᴇʟᴇᴛᴇ ᴍᴇssᴀɢᴇs",                          # required bot right
+                      "ᴘᴇʀsɪsᴛs"):                               # persistence
+            assert words in text, words
+
+    def test_same_typography_as_the_other_pages(self):
+        from strings import helpers
+
+        page = helpers.HELP_5
+        assert page.startswith("<b><u>❖ ʜᴇʟᴘ ғᴏʀ ʟɪɴᴋ ʀᴇsᴛʀɪᴄᴛɪᴏɴ ᴍᴏᴅᴜʟᴇ :</u></b>")
+        assert re.search(r"^<b>๏ /setlink on\s+-</b> ", page, re.M)
+        assert re.search(r"^<b>๏ /setlink off\s+-</b> ", page, re.M)
+        assert re.search(r"^<b>❖ ᴡʜᴇɴ ᴏɴ :</b>$", page, re.M)
+        assert re.search(r"^<b>❖ ʀᴜʟᴇs :</b>$", page, re.M)
+        # The core rules are spelled out in order.
+        visible = _visible(page)
+        blocked_pos = visible.index("ᴅᴇʟᴇᴛᴇᴅ")
+        allowed_pos = visible.index("ᴀʟʟᴏᴡᴇᴅ")
+        username_pos = visible.index("@ᴜsᴇʀɴᴀᴍᴇs")
+        assert blocked_pos < allowed_pos < username_pos or \
+            (blocked_pos < username_pos < allowed_pos), "ALLOW and DELETE rules present"
+
+    async def test_help5_fits_a_photo_caption(self):
+        from pyrogram.parser import Parser
+
+        from strings import helpers
+
+        parsed = await Parser(None).parse(helpers.HELP_5, ParseMode.HTML)
+        length = len(parsed["message"].encode("utf-16-le")) // 2
+        assert length <= 1024, f"HELP_5 is {length} characters"
+
+
+# ---------------------------------------------------------------------------
+# The /start caption advertises the new feature in the existing style
+# ---------------------------------------------------------------------------
+
+class TestStartCaptionBullet:
+    BULLET = "<b>• ⌖ ʟɪɴᴋ ʀєsᴛʀɪᴄᴛɪᴏɴ — ꜱєᴛʟɪɴᴋ ⌖</b>"
+
+    def test_fifth_features_bullet_in_the_existing_style(self):
+        from strings import get_string
+
+        caption = get_string("en")["start_2"]
+        bullets = [line for line in caption.split("\n") if line.startswith("<b>• ⌖ ")]
+        assert len(bullets) == 5, "the FEATURES list gains exactly one bullet"
+        assert bullets[4] == self.BULLET
+        # Same decorations as the original four bullets (• U+2022, ⌖ U+2316,
+        # em-dash U+2014) and the same look-alike alphabet (ꜱ U+A731 word-
+        # initial, є U+0454, phonetic small caps).
+        for bullet in bullets[1:]:
+            assert "•" in bullet and "⌖" in bullet and "—" in bullet
+        assert bullets[4].count("⌖") == 2
+
+    def test_caption_still_fits_the_photo_limit(self):
+        from strings import get_string
+
+        caption = get_string("en")["start_2"]
+        filled = caption.format(
+            '<a href="tg://user?id=1">User</a>',
+            '<a href="https://t.me/bot">Bot</a>',
+        )
+        # start_2 is sent through the Bot API (HTML parse mode): the
+        # rendered caption must stay within 1024 characters.
+        text = html.unescape(re.sub(r"<[^>]+>", "", filled))
+        assert len(text) <= 1024
