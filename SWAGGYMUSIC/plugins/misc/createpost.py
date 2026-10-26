@@ -22,7 +22,7 @@ from contextlib import suppress
 
 from pyrogram import filters, raw
 from pyrogram.enums import ButtonStyle, ChatMemberStatus, ChatType
-from pyrogram.errors import RPCError
+from pyrogram.errors import PeerIdInvalid
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -40,6 +40,14 @@ from SWAGGYMUSIC.utils.createpost_sessions import (
     save_session as _db_save_session,
 )
 from SWAGGYMUSIC.utils.permissions import verify_channel_admin
+from SWAGGYMUSIC.utils.user_resolution import (
+    InvalidUserIdInput,
+    UserResolutionError,
+    ensure_user_peer,
+    log_resolution_failure,
+    parse_user_id,
+    resolve_user,
+)
 
 log = LOGGER(__name__)
 
@@ -263,6 +271,110 @@ def _format_two(mention: str) -> str:
         f"<b>Uꜱᴇʀɴᴀᴍᴇ Rᴇᴍᴏᴠᴇᴅ 🔄🔄</b>\n\n"
         f"<b>Dᴍ Hᴇʀᴇ : {mention} 💗💗</b>\n\n"
         f"<b>Aᴅᴅ Tᴏ Cᴏɴᴛᴀᴄᴛ Mᴇ Aʟᴡᴀʏꜱ 🚩💚</b>"
+    )
+
+
+def _escape_html_text(text: str) -> str:
+    """Escape a user-controlled display name for Telegram HTML.
+
+    Same rules as the final post caption's mention.
+    """
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _bot_handle() -> str:
+    username = getattr(app, "username", None)
+    return f"@{username}" if username else "this bot"
+
+
+def _invalid_user_id_text(reason: str) -> str:
+    """User-facing reply for a typed User ID that fails validation."""
+    if reason == InvalidUserIdInput.EMPTY:
+        return (
+            "❌ <b>No User ID received.</b>\n\n"
+            "Send the numeric Telegram User ID, for example:\n"
+            "<code>123456789</code>"
+        )
+    if reason == InvalidUserIdInput.NEGATIVE:
+        return (
+            "❌ <b>Invalid User ID.</b>\n\n"
+            "That looks like a group or channel ID. Send the ID of a Telegram "
+            "<b>user</b>, digits only, for example:\n"
+            "<code>123456789</code>"
+        )
+    return (
+        "❌ <b>Invalid User ID.</b>\n\n"
+        "Send a valid numeric Telegram User ID, digits only, for example:\n"
+        "<code>123456789</code>"
+    )
+
+
+def _user_resolution_error_text(exc: UserResolutionError) -> str:
+    """User-facing reply when a syntactically valid User ID can't be used."""
+    if exc.kind == UserResolutionError.UNRESOLVABLE:
+        return (
+            "❌ <b>I can't access that user yet.</b>\n\n"
+            "Telegram only lets a bot look up a user by ID after the bot has "
+            "met them, so this ID can be correct and still fail.\n\n"
+            f"<b>Fix:</b> ask that user to open {_bot_handle()} and press "
+            "<b>Start</b>, then send the ID again.\n\n"
+            "<i>If you typed the ID by hand, double-check it too. Telegram gives "
+            "the same answer for IDs that don't exist.</i>"
+        )
+    if exc.kind == UserResolutionError.DELETED:
+        return (
+            "❌ <b>That Telegram account has been deleted.</b>\n\n"
+            "Send the User ID of an active account."
+        )
+    if exc.kind == UserResolutionError.RPC_ERROR:
+        seconds = exc.flood_wait_seconds
+        if seconds:
+            return (
+                "⏳ <b>Telegram is rate-limiting me right now.</b>\n\n"
+                f"Please wait {seconds} seconds, then send the User ID again."
+            )
+        return (
+            "❌ <b>Telegram returned an error while fetching that user.</b>\n\n"
+            f"<code>{exc.rpc_id or 'RPC_ERROR'}</code>\n\n"
+            "Please try again in a moment."
+        )
+    return (
+        "❌ <b>Failed to fetch the user.</b>\n\n"
+        "Something went wrong on my side. Please try again. If it keeps "
+        "happening, contact the bot owner."
+    )
+
+
+def _final_send_resolution_error_text(exc: UserResolutionError) -> str:
+    """Reply when the target user's peer can't be resolved at the final send."""
+    header = "❌ <b>Fᴀɪʟᴇᴅ Tᴏ Cʀᴇᴀᴛᴇ Tʜᴇ Pᴏsᴛ.</b>\n\n"
+    if exc.kind == UserResolutionError.UNRESOLVABLE:
+        return header + (
+            "I can no longer access the selected user, so the mention and the "
+            "profile button can't be created. This happens when the bot "
+            "restarts while the wizard is open.\n\n"
+            f"<b>Fix:</b> ask that user to open {_bot_handle()} and press "
+            "<b>Start</b>, then run /createpost again."
+        )
+    if exc.kind == UserResolutionError.RPC_ERROR:
+        seconds = exc.flood_wait_seconds
+        if seconds:
+            return header + (
+                "Telegram is rate-limiting me right now. Please wait "
+                f"{seconds} seconds, then run /createpost again."
+            )
+        return header + (
+            "Telegram returned an error while preparing the user mention:\n"
+            f"<code>{exc.rpc_id or 'RPC_ERROR'}</code>"
+        )
+    return header + (
+        "Something went wrong while preparing the user mention. Please run "
+        "/createpost again."
     )
 
 
@@ -495,11 +607,27 @@ async def _send_restriction_message(message: Message):
     The caller is responsible for popping the user's session AFTER this
     returns, so the cleanup ordering matches the spec ('clean up the
     session AFTER showing the restriction message').
+
+    The button is a user-profile button: Kurigram resolves OWNER_ID's peer
+    while serializing it, and raises PeerIdInvalid when the bot holds no
+    access hash for the owner (the in-memory peer cache is empty after a
+    restart). The restriction notice is then sent without the button rather
+    than not at all, so the caller's cleanup still runs.
     """
-    await message.reply_text(
-        RESTRICTION_TEXT,
-        reply_markup=_restriction_keyboard(),
-    )
+    try:
+        await message.reply_text(
+            RESTRICTION_TEXT,
+            reply_markup=_restriction_keyboard(),
+        )
+    except PeerIdInvalid as exc:
+        log_resolution_failure(
+            app,
+            "send restriction message (Contact Owner button)",
+            config.OWNER_ID,
+            exc,
+            {"feature": "createpost", "requester_id": getattr(message.from_user, "id", None)},
+        )
+        await message.reply_text(RESTRICTION_TEXT)
 
 
 @app.on_message(filters.command("createpost"))
@@ -823,24 +951,26 @@ async def createpost_input(_, message: Message):
     # Normal Post: User ID.
     if step == "user_id":
         try:
-            target_user_id = int(raw)
-            if target_user_id <= 0:
-                raise ValueError
-            target_user = await app.get_users(target_user_id)
-        except ValueError:
-            return await message.reply_text(
-                "❌ <b>Invalid User ID.</b>\n\nSend a valid numeric Telegram User ID."
+            target_user_id = parse_user_id(raw)
+        except InvalidUserIdInput as exc:
+            return await message.reply_text(_invalid_user_id_text(exc.reason))
+
+        # A bare ID only works if Telegram gives this bot the user's access
+        # hash: from the local peer cache, the zero-access-hash lookup, or the
+        # destination chat's admin list. See utils/user_resolution.py.
+        try:
+            target_user = await resolve_user(
+                app,
+                target_user_id,
+                chat_id=session.get("chat_id"),
+                context={
+                    "feature": "createpost",
+                    "step": "user_id",
+                    "requester_id": user_id,
+                },
             )
-        except RPCError:
-            return await message.reply_text(
-                "❌ <b>I couldn't fetch that user.</b>\n\n"
-                "Make sure the User ID is correct and try again."
-            )
-        except Exception as exc:
-            return await message.reply_text(
-                "❌ <b>Failed to fetch the user.</b>\n\n"
-                f"<code>{type(exc).__name__}: {str(exc)[:300]}</code>"
-            )
+        except UserResolutionError as exc:
+            return await message.reply_text(_user_resolution_error_text(exc))
 
         # Persist the target user ID + cached name (NOT the full User
         # object — see createpost_sessions.py docstring). The in-memory
@@ -854,7 +984,7 @@ async def createpost_input(_, message: Message):
         })
 
         await message.reply_text(
-            f"<b>✅ User:</b> <a href='tg://user?id={target_user.id}'>{name}</a>\n\n"
+            f"<b>✅ User:</b> <a href='tg://user?id={target_user.id}'>{_escape_html_text(name)}</a>\n\n"
             "<b>3/5 — Cʜᴏᴏsᴇ Bᴜᴛᴛᴏɴ Cᴏʟᴏᴜʀ</b>",
             reply_markup=_colour_menu(),
         )
@@ -924,6 +1054,22 @@ async def createpost_input(_, message: Message):
                 target_user.id = int(target_user_id_db)
                 target_user.first_name = target_user_name_db
 
+            # The caption mention and the profile button below both make
+            # Kurigram resolve the user's peer while serializing the send.
+            # After a restart mid-wizard the in-memory peer cache is empty,
+            # so make sure the peer resolves (or fail with a clear message)
+            # instead of losing the mention or the whole send.
+            await ensure_user_peer(
+                app,
+                int(target_user.id),
+                chat_id=session.get("chat_id"),
+                context={
+                    "feature": "createpost",
+                    "step": "sending",
+                    "requester_id": user_id,
+                },
+            )
+
             name = target_user.first_name or "User"
 
             safe_name = (
@@ -960,6 +1106,9 @@ async def createpost_input(_, message: Message):
             await message.reply_text(
                 "✅ <b>Pᴏsᴛ Cʀᴇᴀᴛᴇᴅ Sᴜᴄᴄᴇssғᴜʟʟʏ.</b>"
             )
+
+        except UserResolutionError as exc:
+            await message.reply_text(_final_send_resolution_error_text(exc))
 
         except Exception as exc:
             await message.reply_text(
