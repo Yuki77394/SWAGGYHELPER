@@ -20,3 +20,4 @@ pymongo>=4.9,<5
 psutil>=5.9.8
 heroku3>=5.2.1
 Pillow==12.1.1
+six>=1.16.0
